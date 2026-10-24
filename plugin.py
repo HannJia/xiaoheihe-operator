@@ -220,7 +220,19 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
             return
         for item in items:
             event = self._normalize_event(item, event_type)
-            if event is None or not self._store.claim_incoming(event.event_key, event_type.value, item):
+            if event is None:
+                continue
+            audit_payload = {
+                "event_key": event.event_key,
+                "kind": event.kind,
+                "post_id": event.post_id,
+                "comment_id": event.comment_id,
+                "root_comment_id": event.root_comment_id,
+                "sender_id": event.sender_id,
+                "sender_name": event.sender_name,
+                "text": event.text,
+            }
+            if not self._store.claim_incoming(event.event_key, event_type.value, audit_payload):
                 continue
             await self._process_event(client, event)
         self._store.set_cursor(self.config.profile_id, event_type.value, next_cursor, baseline_ready=True)

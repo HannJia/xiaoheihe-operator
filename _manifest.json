@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "org.orge-8.xiaoheihe-operator",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "name": "小黑盒运营",
   "description": "将萧鱼儿的生活轨迹、游戏话题和配图能力接入小黑盒社区。",
   "author": {
@@ -42,3 +42,4 @@
     "default_locale": "zh-CN"
   }
 }
+
