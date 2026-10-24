@@ -201,12 +201,61 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         client = await self._runtime.client()
         await self._retry_pre_send_proactive_posts(client)
         await self._reconcile_unknowns(client)
+        await self._retry_cooldown_comments(client)
         for event_type in (NotificationType.MENTION, NotificationType.REPLY):
             await self._poll_notifications(client, event_type)
         now = time.time()
         if now - self._last_feed_at >= max(300, int(self.config.feed_interval_seconds)):
             self._last_feed_at = now
             await self._proactive_once(client)
+
+    async def _retry_cooldown_comments(self, client) -> None:
+        """Retry comments deferred by the account-level cooldown.
+
+        Cooldown suppression is transient. The action stays in the audit log,
+        while this pass retries it after the cooldown expires. Only one action
+        is attempted per poll so a backlog cannot burst through the account
+        rate limit.
+        """
+        if self._store is None or str(self.config.mode).lower() != "auto":
+            return
+        for row in self._store.list_outgoing(status=OutgoingStatus.SUPPRESSED, limit=50):
+            if str(row.get("error") or "") != "cooldown":
+                continue
+            kind = str(row.get("kind") or "")
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            if kind == "notification_reply":
+                if not self._within_quota(
+                    "notification_reply", int(self.config.notification_replies_per_day)
+                ):
+                    continue
+                route = RoutingTarget(
+                    profile_id=self.config.profile_id,
+                    post_id=str(metadata.get("post_id") or row.get("target_id") or ""),
+                    root_comment_id=str(metadata.get("root_comment_id") or ""),
+                    parent_comment_id=str(metadata.get("parent_comment_id") or ""),
+                    notification_id=str(metadata.get("event_key") or ""),
+                )
+            elif kind == "proactive_comment":
+                if not self._within_quota(
+                    "proactive_comment", int(self.config.proactive_comments_per_day)
+                ):
+                    continue
+                route = RoutingTarget(
+                    profile_id=self.config.profile_id,
+                    post_id=str(metadata.get("post_id") or row.get("target_id") or ""),
+                )
+            else:
+                continue
+            if not route.post_id or not str(row.get("content") or "").strip():
+                continue
+            await self._dispatch_comment(
+                client,
+                action_key=str(row.get("action_key") or ""),
+                route=route,
+                content=str(row.get("content") or ""),
+            )
+            return
 
     async def _poll_notifications(self, client, event_type: NotificationType) -> None:
         assert self._store is not None
