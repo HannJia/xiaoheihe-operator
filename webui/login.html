@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>小黑盒账号登录</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { margin: 0; padding: 24px; background: var(--maibot-background, #fff); color: var(--maibot-foreground, #202124); font-family: var(--maibot-font-body, system-ui, sans-serif); }
+    .shell { max-width: 680px; margin: 0 auto; }
+    .card { padding: 24px; border: 1px solid var(--maibot-border, #ddd); border-radius: var(--maibot-radius, 12px); background: var(--maibot-surface, #fff); }
+    h1 { margin: 0 0 8px; font-size: 22px; }
+    p { line-height: 1.6; }
+    .muted { color: var(--maibot-muted, #6b7280); }
+    .row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+    .qr-wrap { display: flex; justify-content: center; margin: 24px 0 16px; min-height: 280px; }
+    #qr { width: min(360px, 100%); height: auto; image-rendering: pixelated; border-radius: 8px; background: #fff; }
+    #qr[hidden] { display: none; }
+    .status { margin: 12px 0; min-height: 24px; }
+    .badge { display: inline-block; padding: 3px 8px; border-radius: 999px; background: var(--maibot-soft, #eef2ff); }
+    button { border: 0; border-radius: 8px; padding: 9px 14px; cursor: pointer; color: var(--maibot-primary-foreground, #fff); background: var(--maibot-primary, #4f46e5); }
+    button:disabled { cursor: wait; opacity: .6; }
+    .tip { margin-top: 18px; font-size: 13px; }
+  </style>
+</head>
+<body class="maibot-page">
+  <main class="shell">
+    <section class="card">
+      <h1>小黑盒账号登录</h1>
+      <p class="muted">二维码由插件直接生成并显示在这里。请使用小黑盒 App 扫码，在手机端确认后保持本页打开。</p>
+      <div class="status" id="status" role="status">正在读取登录状态…</div>
+      <div class="qr-wrap"><img id="qr" alt="小黑盒扫码登录二维码" hidden></div>
+      <div class="row">
+        <button id="new-qr" type="button">生成二维码</button>
+        <span class="muted" id="countdown"></span>
+      </div>
+      <p class="tip muted">登录会话只保存在插件专属数据目录；页面不会显示或复制原始登录链接。</p>
+    </section>
+  </main>
+  <script type="module">
+    const statusNode = document.querySelector('#status');
+    const qrNode = document.querySelector('#qr');
+    const countdownNode = document.querySelector('#countdown');
+    const newQrButton = document.querySelector('#new-qr');
+    let refreshTimer = null;
+    let refreshInFlight = false;
+
+    function render(data) {
+      const state = String(data?.state || 'unknown');
+      const labels = {
+        idle: '尚未登录',
+        waiting_scan: '等待扫码',
+        scanned_waiting_confirm: '已扫码，等待手机确认',
+        success: data.nickname ? `已登录：${data.nickname}` : '已登录',
+        expired: '二维码已过期，请重新生成',
+        credential_invalid: '登录已失效，请重新扫码',
+        failed: '登录状态读取失败',
+      };
+      statusNode.replaceChildren();
+      const badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.textContent = labels[state] || state;
+      statusNode.append(badge);
+      if (data?.message) statusNode.append(document.createTextNode(`　${String(data.message)}`));
+      if (data?.qr_image && (state === 'waiting_scan' || state === 'scanned_waiting_confirm')) {
+        qrNode.src = data.qr_image;
+        qrNode.hidden = false;
+      } else {
+        qrNode.removeAttribute('src');
+        qrNode.hidden = true;
+      }
+      const remaining = Number(data?.remaining_seconds || 0);
+      countdownNode.textContent = remaining > 0 ? `二维码剩余 ${remaining} 秒` : '';
+    }
+
+    async function refresh() {
+      if (refreshInFlight) return;
+      refreshInFlight = true;
+      try {
+        render(await maibot.query('status'));
+      } catch (error) {
+        statusNode.textContent = error?.message || '登录状态读取失败';
+      } finally {
+        refreshInFlight = false;
+      }
+    }
+
+    newQrButton.addEventListener('click', async () => {
+      newQrButton.disabled = true;
+      try {
+        render(await maibot.action('request_qr', {}));
+      } catch (error) {
+        statusNode.textContent = error?.message || '二维码生成失败';
+      } finally {
+        newQrButton.disabled = false;
+      }
+    });
+
+    await maibot.ready;
+    await refresh();
+    refreshTimer = window.setInterval(refresh, 2500);
+  </script>
+</body>
+</html>

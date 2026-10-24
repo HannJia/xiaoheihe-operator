@@ -1,0 +1,26 @@
+{
+  "schema_version": 2,
+  "required_capabilities": ["custom_pages"],
+  "workspace_title": "小黑盒运营",
+  "pages": [
+    {
+      "id": "login",
+      "title": "账号登录",
+      "placement": "workspace",
+      "mode": "custom",
+      "entry": "webui/login.html",
+      "layout": "document",
+      "queries": {
+        "status": {
+          "api": "webui_login_status"
+        }
+      },
+      "actions": {
+        "request_qr": {
+          "api": "webui_request_login",
+          "confirmation": "确认生成新的小黑盒登录二维码？"
+        }
+      }
+    }
+  ]
+}

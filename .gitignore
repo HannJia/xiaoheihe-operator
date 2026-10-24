@@ -1,0 +1,6 @@
+/config.toml
+/data/
+/credentials/
+__pycache__/
+*.py[cod]
+.pytest_cache/
