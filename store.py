@@ -166,18 +166,18 @@ class OperatorStore:
         if kind:
             row = self._conn.execute(
                 """
-                SELECT created_at FROM outgoing_actions
+                SELECT updated_at FROM outgoing_actions
                 WHERE kind=? AND status NOT IN (?, ?)
-                ORDER BY created_at DESC LIMIT 1
+                ORDER BY updated_at DESC LIMIT 1
                 """,
                 (kind, OutgoingStatus.SUPPRESSED.value, OutgoingStatus.FAILED.value),
             ).fetchone()
         else:
             row = self._conn.execute(
                 """
-                SELECT created_at FROM outgoing_actions
+                SELECT updated_at FROM outgoing_actions
                 WHERE status NOT IN (?, ?)
-                ORDER BY created_at DESC LIMIT 1
+                ORDER BY updated_at DESC LIMIT 1
                 """,
                 (OutgoingStatus.SUPPRESSED.value, OutgoingStatus.FAILED.value),
             ).fetchone()
