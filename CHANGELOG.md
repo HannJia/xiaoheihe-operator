@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0 - 2026-10-26
+
+- Added independent server-local time windows for recommendation browsing/active comments and proactive posts.
+- Made the three MaiBot integrations optional so text-only Xiaoheihe posting works without them.
+- Changed new-install image generation to opt-in instead of requiring the drawing plugin.
+- Added the user-provided Xiaoheihe-style local avatar to the manifest.
+- Corrected the release documentation boundary to match the published `auto` default.
+
 ## 0.3.9 - 2026-10-26
 
 - Changed the new-install recommendation flow interval default to 600 seconds (10 minutes).

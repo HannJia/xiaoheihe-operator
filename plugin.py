@@ -35,6 +35,39 @@ DEFAULT_COMMUNITY_ALLOWLIST = ("PC 游戏", "盒友杂谈")
 MAX_ALLOWLIST_ITEMS = 10
 MAX_POST_TARGETS = 2
 
+
+def _time_window_active(start: str, end: str, now: float | None = None) -> bool:
+    """判断服务器本地时间是否落在 HH:MM 时间窗口内。
+
+    起止时间相同表示全天；结束时间早于开始时间时按跨午夜窗口处理。
+    配置格式不合法时安全返回 False，避免意外自动执行。
+    """
+
+    def to_minutes(value: object) -> int | None:
+        text = str(value or "").strip()
+        parts = text.split(":")
+        if len(parts) != 2:
+            return None
+        try:
+            hour, minute = int(parts[0]), int(parts[1])
+        except ValueError:
+            return None
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return None
+        return hour * 60 + minute
+
+    start_minutes = to_minutes(start)
+    end_minutes = to_minutes(end)
+    if start_minutes is None or end_minutes is None:
+        return False
+    if start_minutes == end_minutes:
+        return True
+    current = time.localtime(time.time() if now is None else now)
+    current_minutes = current.tm_hour * 60 + current.tm_min
+    if start_minutes < end_minutes:
+        return start_minutes <= current_minutes < end_minutes
+    return current_minutes >= start_minutes or current_minutes < end_minutes
+
 # Literal 让 MaiBot SDK 自动生成真正的下拉框和选项；显示给用户的是中文名称，
 # 插件运行时再通过小黑盒搜索接口解析为内部 topic_id。
 CommunityName = Literal[
@@ -157,10 +190,24 @@ class XiaoheiheBrowseSection(PluginConfigBase):
         default=600,
         step=300,
     )
+    feed_active_start_time: str = _ui_field(
+        label="AI 浏览开始时间",
+        hint="只限制推荐流读取和主动评论的时间窗口，使用服务器本地时间 HH:MM；默认 08:00。与结束时间相同表示全天。",
+        order=2,
+        default="08:00",
+        placeholder="例如 08:00",
+    )
+    feed_active_end_time: str = _ui_field(
+        label="AI 浏览结束时间",
+        hint="只限制推荐流读取和主动评论的时间窗口，使用服务器本地时间 HH:MM；默认 23:00。支持跨午夜窗口。",
+        order=3,
+        default="23:00",
+        placeholder="例如 23:00",
+    )
     game_topic_hints: list[str] = _ui_field(
         label="游戏筛选关键词",
         hint="推荐流只处理命中这些关键词的游戏相关帖子；点击添加项目逐条填写。",
-        order=2,
+        order=4,
         default_factory=lambda: [
             "游戏", "steam", "switch", "ps5", "pc", "副本", "角色", "抽卡",
             "绝区零", "原神", "崩坏", "星穹铁道", "apex", "瓦罗兰特", "单机",
@@ -201,10 +248,24 @@ class XiaoheiheAutomationSection(PluginConfigBase):
         default=120,
         step=30,
     )
+    post_active_start_time: str = _ui_field(
+        label="自动发帖开始时间",
+        hint="只限制主动发帖和失败重试的时间窗口，使用服务器本地时间 HH:MM；默认 10:00。与结束时间相同表示全天。",
+        order=4,
+        default="10:00",
+        placeholder="例如 10:00",
+    )
+    post_active_end_time: str = _ui_field(
+        label="自动发帖结束时间",
+        hint="只限制主动发帖和失败重试的时间窗口，使用服务器本地时间 HH:MM；默认 22:00。支持跨午夜窗口。",
+        order=5,
+        default="22:00",
+        placeholder="例如 22:00",
+    )
     community_allowlist: list[str] = _ui_field(
         label="社区白名单",
         hint="允许浏览和主动互动的社区；默认包含 PC 游戏、盒友杂谈。最多选择 10 个，留空表示不主动互动。",
-        order=4,
+        order=6,
         default_factory=lambda: list(DEFAULT_COMMUNITY_ALLOWLIST),
         json_schema_extra={
             "items": {"type": "string", "enum": list(COMMUNITY_OPTIONS)},
@@ -214,13 +275,13 @@ class XiaoheiheAutomationSection(PluginConfigBase):
     post_target_primary: PostTargetName = _ui_field(
         label="发帖目标 1（社区/话题）",
         hint="选择第一个发帖社区或话题；插件会自动解析内部 ID。留空表示不自动发帖。两个目标可以暂时选成一样，发送前会自动去重。",
-        order=5,
+        order=7,
         default="Steam",
     )
     post_target_secondary: PostTargetName = _ui_field(
         label="发帖目标 2（可选）",
         hint="可再选择一个与目标 1 不同的社区或话题；小黑盒单条帖子最多选择 2 个目标。若重复选择，发送前会自动去重。留空即可。",
-        order=6,
+        order=8,
         default="PC 游戏",
     )
     post_topic_ids: list[str] = _ui_field(
@@ -245,19 +306,19 @@ class XiaoheiheContentSection(PluginConfigBase):
 
     generate_post_images: bool = _ui_field(
         label="自动生成帖子图片",
-        hint="联动插件：麦麦绘图（ID：maimai-drawpic-plugin）。开启后调用 drawpic_submit_v2、drawpic_request_v2、drawpic_task_v2、drawpic_image_v2 生成并读取帖子图片；需要已安装并启用该插件。",
+        hint="可选联动「麦麦绘图」（ID：maimai-drawpic-plugin）。开启后生成帖子图片；未安装联动插件时请关闭，关闭后仍可纯文本自动发帖。",
         order=0,
-        default=True,
+        default=False,
     )
     life_context_api: str = _ui_field(
         label="生活轨迹 API",
-        hint="联动插件：生活频率（ID：org.orge-8.life-frequency）；当前完整 API 是 org.orge-8.life-frequency.get_current_context，只读调用。获取方法：查看该插件 _manifest.json 的插件 ID，再在源码中查找 @API(name=\"get_current_context\")；一般无需修改。",
+        hint="可选联动「生活频率」（ID：org.orge-8.life-frequency）；当前完整 API 是 org.orge-8.life-frequency.get_current_context，只读调用。未安装时会自动退回当前时间和已有设定，不影响纯文本发帖。",
         order=1,
         default="org.orge-8.life-frequency.get_current_context",
     )
     identity_reference_api: str = _ui_field(
         label="身份参考图 API",
-        hint="联动插件：自我身份档案（ID：org.mai-mai.self-identity）；当前完整 API 是 org.mai-mai.self-identity.get_default_reference_image，只读调用。获取方法：查看该插件 _manifest.json 的插件 ID，再在源码中查找 @API(name=\"get_default_reference_image\")；一般无需修改。",
+        hint="可选联动「自我身份档案」（ID：org.mai-mai.self-identity）；当前完整 API 是 org.mai-mai.self-identity.get_default_reference_image，只读调用。只在生成图片时作为参考图使用，未安装时会自动跳过。",
         order=2,
         default="org.mai-mai.self-identity.get_default_reference_image",
     )
@@ -348,6 +409,14 @@ class XiaoheiheConfig(PluginConfigBase):
         return self.browse.feed_interval_seconds
 
     @property
+    def feed_active_start_time(self) -> str:
+        return self.browse.feed_active_start_time
+
+    @property
+    def feed_active_end_time(self) -> str:
+        return self.browse.feed_active_end_time
+
+    @property
     def posts_per_day(self) -> int:
         return self.automation.posts_per_day
 
@@ -362,6 +431,14 @@ class XiaoheiheConfig(PluginConfigBase):
     @property
     def send_cooldown_seconds(self) -> int:
         return self.automation.send_cooldown_seconds
+
+    @property
+    def post_active_start_time(self) -> str:
+        return self.automation.post_active_start_time
+
+    @property
+    def post_active_end_time(self) -> str:
+        return self.automation.post_active_end_time
 
     @property
     def dm_enabled(self) -> bool:
@@ -432,11 +509,15 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         "mode": "basic",
         "poll_interval_seconds": "browse",
         "feed_interval_seconds": "browse",
+        "feed_active_start_time": "browse",
+        "feed_active_end_time": "browse",
         "game_topic_hints": "browse",
         "posts_per_day": "automation",
         "proactive_comments_per_day": "automation",
         "notification_replies_per_day": "automation",
         "send_cooldown_seconds": "automation",
+        "post_active_start_time": "automation",
+        "post_active_end_time": "automation",
         "community_allowlist": "automation",
         "post_target_primary": "automation",
         "post_target_secondary": "automation",
@@ -632,7 +713,16 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         if self._store is None or self._runtime is None or self._runtime.credentials is None:
             return
         client = await self._runtime.client()
-        await self._retry_pre_send_proactive_posts(client)
+        post_window_active = _time_window_active(
+            self.config.post_active_start_time,
+            self.config.post_active_end_time,
+        )
+        browse_window_active = _time_window_active(
+            self.config.feed_active_start_time,
+            self.config.feed_active_end_time,
+        )
+        if post_window_active:
+            await self._retry_pre_send_proactive_posts(client)
         await self._reconcile_unknowns(client)
         await self._retry_cooldown_comments(client)
         for event_type in (NotificationType.MENTION, NotificationType.REPLY):
@@ -643,7 +733,12 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
             await self._poll_direct_messages(client)
         if now - self._last_feed_at >= max(300, int(self.config.feed_interval_seconds)):
             self._last_feed_at = now
-            await self._proactive_once(client)
+            if post_window_active or browse_window_active:
+                await self._proactive_once(
+                    client,
+                    post_window_active=post_window_active,
+                    browse_window_active=browse_window_active,
+                )
 
     async def _retry_cooldown_comments(self, client) -> None:
         """Retry comments deferred by the account-level cooldown.
@@ -660,6 +755,11 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
                 continue
             kind = str(row.get("kind") or "")
             metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            if kind == "proactive_comment" and not _time_window_active(
+                self.config.feed_active_start_time,
+                self.config.feed_active_end_time,
+            ):
+                continue
             if kind == "notification_reply":
                 if not self._within_quota(
                     "notification_reply", int(self.config.notification_replies_per_day)
@@ -1255,11 +1355,29 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
             except Exception as exc:  # noqa: BLE001
                 self.ctx.logger.debug("小黑盒未知发送状态仍无法核验：%s", type(exc).__name__)
 
-    async def _proactive_once(self, client) -> None:
+    async def _proactive_once(
+        self,
+        client,
+        *,
+        post_window_active: bool | None = None,
+        browse_window_active: bool | None = None,
+    ) -> None:
         if not self.config.enabled or str(self.config.mode).lower() not in {"auto", "dry_run"}:
             return
-        if self._within_quota("proactive_post", int(self.config.posts_per_day)):
+        if post_window_active is None:
+            post_window_active = _time_window_active(
+                self.config.post_active_start_time,
+                self.config.post_active_end_time,
+            )
+        if browse_window_active is None:
+            browse_window_active = _time_window_active(
+                self.config.feed_active_start_time,
+                self.config.feed_active_end_time,
+            )
+        if post_window_active and self._within_quota("proactive_post", int(self.config.posts_per_day)):
             await self._create_proactive_post(client)
+        if not browse_window_active:
+            return
         if self._within_quota("proactive_comment", int(self.config.proactive_comments_per_day)):
             try:
                 page = await client.fetch_feed(offset=0)
@@ -1334,6 +1452,11 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
 
     async def _create_proactive_post(self, client) -> None:
         if self._store is None or self._generator is None or self._persona is None:
+            return
+        if not _time_window_active(
+            self.config.post_active_start_time,
+            self.config.post_active_end_time,
+        ):
             return
         raw_targets = _normalize_selection_values(self.config.post_topic_ids, max_items=None)
         targets = raw_targets[:MAX_POST_TARGETS]
@@ -1494,7 +1617,10 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
     async def _retry_pre_send_proactive_posts(self, client) -> None:
         """Retry an action only when no external post request was started."""
 
-        if self._store is None:
+        if self._store is None or not _time_window_active(
+            self.config.post_active_start_time,
+            self.config.post_active_end_time,
+        ):
             return
         rows = self._store.list_outgoing(status=OutgoingStatus.FAILED, limit=30)
         if any(
@@ -1533,6 +1659,8 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
             "settings_help": {
                 "mode": "dry_run 只记录计划；auto 才会真实发送",
                 "feed_interval_seconds": "推荐 600 秒，即每 10 分钟浏览一次；这是插件默认建议，不是小黑盒官方固定检查时间",
+                "feed_active_window": f"AI 浏览和主动评论只在服务器本地时间 {self.config.feed_active_start_time}-{self.config.feed_active_end_time} 运行；与发帖时间窗口独立",
+                "post_active_window": f"主动发帖和发送前失败重试只在服务器本地时间 {self.config.post_active_start_time}-{self.config.post_active_end_time} 运行",
                 "posts_per_day": "建议测试阶段保持 0",
                 "notification_replies_per_day": "建议从 1 开始，确认链路后再增加",
                 "dm_user_allowlist": "私信功能暂不启用；保留字段仅用于兼容旧配置",

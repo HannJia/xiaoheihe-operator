@@ -60,5 +60,16 @@ def test_plugin_module_loads_with_runner_sdk_surface():
     assert config.enabled is True
     assert config.mode == "auto"
     assert config.browse.feed_interval_seconds == 600
+    assert config.browse.feed_active_start_time == "08:00"
+    assert config.browse.feed_active_end_time == "23:00"
+    assert config.automation.post_active_start_time == "10:00"
+    assert config.automation.post_active_end_time == "22:00"
+    assert config.content.generate_post_images is False
     assert config.automation.posts_per_day == 1
     assert config.post_topic_ids == ["Steam", "PC 游戏"]
+    assert module._time_window_active("08:00", "23:00", 12 * 3600)
+    assert not module._time_window_active("08:00", "23:00", 23 * 3600)
+    local_01 = module.time.mktime((2026, 1, 1, 1, 0, 0, 0, 0, -1))
+    local_03 = module.time.mktime((2026, 1, 1, 3, 0, 0, 0, 0, -1))
+    assert module._time_window_active("22:00", "02:00", local_01)
+    assert module._time_window_active("09:00", "09:00", local_03)
