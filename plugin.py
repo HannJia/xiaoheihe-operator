@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
+from collections.abc import Mapping
 from pathlib import Path
-from typing import ClassVar, Iterable
+from typing import Any, ClassVar, Iterable
 
 from maibot_sdk import API, Command, Field, MaiBotPlugin, PluginConfigBase, Tool
 
@@ -38,141 +39,339 @@ except ImportError:  # pragma: no cover - direct Runner fallback
     from xiaoheihe_runtime import XiaoheiheRuntime
 
 
+def _ui_field(*, label: str, hint: str, order: int, **kwargs: Any):
+    """统一给 MaiBot 配置页补齐中文标签、提示和顺序。"""
+
+    extra = dict(kwargs.pop("json_schema_extra", {}) or {})
+    extra.update({"label": label, "hint": hint, "order": order})
+    return Field(json_schema_extra=extra, description=hint, **kwargs)
+
+
 class XiaoheihePluginSection(PluginConfigBase):
-    config_version: str = Field(default="0.1.0", description="配置格式版本，由插件维护，不需要手动修改")
-    enabled: bool = Field(default=False, description="总开关：关闭时只保留登录和只读检查，不执行自动发帖、评论或回复")
-    profile_id: str = Field(default="default", description="小黑盒账号档案 ID；只有多账号时才需要改名")
-    mode: str = Field(default="dry_run", description="运行模式：dry_run 只生成并记录计划，auto 才会向小黑盒发送内容")
-    poll_interval_seconds: int = Field(default=60, description="通知检查间隔，单位秒，最低 30；用于提及、评论和楼中楼回复")
-    feed_interval_seconds: int = Field(default=3600, description="推荐流浏览间隔，单位秒；建议 3600，避免频繁请求和增加模型消耗")
-    posts_per_day: int = Field(default=0, description="每天主动发帖数量；设为 0 表示关闭自动发帖")
-    proactive_comments_per_day: int = Field(default=1, description="每天对推荐流主动评论数量；设为 0 表示关闭主动评论")
-    notification_replies_per_day: int = Field(default=1, description="每天回复提及、评论和楼中楼的数量；设为 0 表示关闭自动回复")
-    send_cooldown_seconds: int = Field(default=120, description="两次发送之间的最短间隔，单位秒，用于降低重复发送和账号风控风险")
-    dm_enabled: bool = Field(default=False, description="私信功能暂不纳入当前发布范围；保持关闭可避免轮询私信")
-    dm_mode: str = Field(default="dry_run", description="兼容保留字段：当前发布版不提供私信发送，auto 会安全闭锁")
-    dm_poll_interval_seconds: int = Field(default=180, description="私信检查间隔，单位秒；只在发现新消息时调用模型")
-    dm_daily_quota: int = Field(default=1, description="每天自动回复私信数量；设为 0 表示关闭私信回复")
-    dm_cooldown_seconds: int = Field(default=600, description="同一账号两次私信回复的最短间隔，单位秒")
-    dm_max_reply_chars: int = Field(default=180, description="私信自动回复最大字数")
-    dm_user_allowlist: list[str] = Field(default_factory=list, description="允许自动回复的对方 UID；留空表示只读，不自动生成私信回复")
-    community_allowlist: list[str] = Field(default_factory=list, description="允许浏览和主动互动的社区 ID；留空表示不主动互动")
-    generate_post_images: bool = Field(default=True, description="自动发帖时是否调用生图插件并附带图片")
-    life_context_api: str = Field(
-        default="org.orge-8.life-frequency.get_current_context",
-        description="提供当前生活轨迹的 MaiBot API 名称，只读调用",
+    """插件元信息；旧版扁平配置中的业务字段会自动迁移。"""
+
+    __ui_label__ = "插件信息"
+    __ui_icon__ = "settings"
+    __ui_order__ = 0
+
+    config_version: str = _ui_field(
+        label="配置版本",
+        hint="由插件维护，用于识别配置格式；通常不需要手动修改。",
+        order=0,
+        default="0.1.0",
+        json_schema_extra={"disabled": True},
     )
-    identity_reference_api: str = Field(
-        default="org.mai-mai.self-identity.get_default_reference_image",
-        description="提供生图参考图的 MaiBot API 名称，只读调用",
+
+
+class XiaoheiheBasicSection(PluginConfigBase):
+    __ui_label__ = "基础设置"
+    __ui_icon__ = "settings-2"
+    __ui_order__ = 1
+
+    enabled: bool = _ui_field(
+        label="启用自动运营",
+        hint="关闭时只保留登录和只读检查，不执行自动发帖、评论或回复。",
+        order=0,
+        default=False,
     )
-    post_topic_ids: str = Field(default="", description="主动发帖使用的社区或话题 ID，多个 ID 用英文逗号分隔；留空表示不自动发帖")
-    game_topic_hints: list[str] = Field(
+    profile_id: str = _ui_field(
+        label="小黑盒账号档案 ID",
+        hint="当前账号使用的档案名称；单账号保持 default，多账号时再区分。",
+        order=1,
+        default="default",
+    )
+    mode: str = _ui_field(
+        label="运行模式",
+        hint="dry_run 只生成并记录计划；auto 才会向小黑盒发送内容。测试阶段建议保持 dry_run。",
+        order=2,
+        default="dry_run",
+        placeholder="dry_run 或 auto",
+    )
+
+
+class XiaoheiheBrowseSection(PluginConfigBase):
+    __ui_label__ = "浏览与筛选"
+    __ui_icon__ = "rss"
+    __ui_order__ = 2
+
+    poll_interval_seconds: int = _ui_field(
+        label="通知检查间隔（秒）",
+        hint="检查提及、评论和楼中楼通知的间隔；最低 30 秒，常用值为 60。",
+        order=0,
+        default=60,
+        step=30,
+    )
+    feed_interval_seconds: int = _ui_field(
+        label="推荐流浏览间隔（秒）",
+        hint="读取推荐流的间隔；3600 秒就是 60 分钟，可降低请求和模型消耗。",
+        order=1,
+        default=3600,
+        step=300,
+    )
+    game_topic_hints: list[str] = _ui_field(
+        label="游戏筛选关键词",
+        hint="推荐流只处理命中这些关键词的游戏相关帖子；点击添加项目逐条填写。",
+        order=2,
         default_factory=lambda: [
             "游戏", "steam", "switch", "ps5", "pc", "副本", "角色", "抽卡",
             "绝区零", "原神", "崩坏", "星穹铁道", "apex", "瓦罗兰特", "单机",
         ],
-        description="推荐流筛选关键词；只处理游戏相关帖子，多个关键词按列表填写",
+    )
+
+
+class XiaoheiheAutomationSection(PluginConfigBase):
+    __ui_label__ = "自动运营额度"
+    __ui_icon__ = "send"
+    __ui_order__ = 3
+
+    posts_per_day: int = _ui_field(
+        label="每日主动发帖数",
+        hint="每天最多主动发布的帖子数量；设为 0 表示关闭自动发帖。",
+        order=0,
+        default=0,
+        step=1,
+    )
+    proactive_comments_per_day: int = _ui_field(
+        label="每日主动评论数",
+        hint="每天最多对推荐流帖子发表评论的数量；设为 0 表示关闭主动评论。",
+        order=1,
+        default=1,
+        step=1,
+    )
+    notification_replies_per_day: int = _ui_field(
+        label="每日通知回复数",
+        hint="每天最多回复提及、评论和楼中楼通知的数量；设为 0 表示关闭自动回复。",
+        order=2,
+        default=1,
+        step=1,
+    )
+    send_cooldown_seconds: int = _ui_field(
+        label="发送冷却时间（秒）",
+        hint="两次发送之间的最短间隔，用于降低重复发送和账号风控风险。",
+        order=3,
+        default=120,
+        step=30,
+    )
+    community_allowlist: list[str] = _ui_field(
+        label="社区白名单",
+        hint="允许浏览和主动互动的社区 ID；留空表示不主动互动。点击添加项目逐条填写。",
+        order=4,
+        default_factory=list,
+    )
+    post_topic_ids: str = _ui_field(
+        label="发帖社区/话题 ID",
+        hint="主动发帖使用的社区或话题 ID，多个 ID 用英文逗号分隔；留空表示不自动发帖。",
+        order=5,
+        default="",
+        placeholder="例如 12345,67890",
+    )
+
+
+class XiaoheiheContentSection(PluginConfigBase):
+    __ui_label__ = "内容与插件联动"
+    __ui_icon__ = "puzzle"
+    __ui_order__ = 4
+
+    generate_post_images: bool = _ui_field(
+        label="自动生成帖子图片",
+        hint="自动发帖时是否调用生图插件并附带图片；需要已安装并启用生图插件。",
+        order=0,
+        default=True,
+    )
+    life_context_api: str = _ui_field(
+        label="生活轨迹 API",
+        hint="提供当前生活轨迹的 MaiBot API 名称，只读调用；一般无需修改。",
+        order=1,
+        default="org.orge-8.life-frequency.get_current_context",
+    )
+    identity_reference_api: str = _ui_field(
+        label="身份参考图 API",
+        hint="提供生图身份参考图的 MaiBot API 名称，只读调用；一般无需修改。",
+        order=2,
+        default="org.mai-mai.self-identity.get_default_reference_image",
+    )
+
+
+class XiaoheiheDirectMessageSection(PluginConfigBase):
+    __ui_label__ = "私信兼容设置"
+    __ui_icon__ = "message-circle"
+    __ui_order__ = 5
+
+    dm_enabled: bool = _ui_field(
+        label="启用私信功能",
+        hint="当前发布版不提供稳定的私信自动发送，建议保持关闭；网页版也不能直接回复私信。",
+        order=0,
+        default=False,
+    )
+    dm_mode: str = _ui_field(
+        label="私信运行模式",
+        hint="兼容保留字段；当前版本不提供私信发送，auto 也会安全闭锁。",
+        order=1,
+        default="dry_run",
+        placeholder="dry_run",
+    )
+    dm_poll_interval_seconds: int = _ui_field(
+        label="私信检查间隔（秒）",
+        hint="兼容保留字段；只在未来接入私信能力后生效。",
+        order=2,
+        default=180,
+        step=30,
+    )
+    dm_daily_quota: int = _ui_field(
+        label="每日私信回复数",
+        hint="兼容保留字段；当前版本不会发送私信，设为 0 可明确关闭。",
+        order=3,
+        default=1,
+        step=1,
+    )
+    dm_cooldown_seconds: int = _ui_field(
+        label="私信回复冷却（秒）",
+        hint="兼容保留字段；未来接入私信能力后用于限制同一账号的回复频率。",
+        order=4,
+        default=600,
+        step=60,
+    )
+    dm_max_reply_chars: int = _ui_field(
+        label="私信回复最大字数",
+        hint="兼容保留字段；当前版本不会发送私信。",
+        order=5,
+        default=180,
+        step=20,
+    )
+    dm_user_allowlist: list[str] = _ui_field(
+        label="私信对象白名单",
+        hint="兼容保留字段；当前版本不会生成自动私信回复，建议留空。点击添加项目逐条填写 UID。",
+        order=6,
+        default_factory=list,
     )
 
 
 class XiaoheiheConfig(PluginConfigBase):
-    """插件根配置；``plugin`` 子节由 MaiBot Runner 管理版本。"""
+    """插件根配置；分组只调整配置页布局，旧版扁平 [plugin] 会自动迁移。"""
 
     plugin: XiaoheihePluginSection = Field(default_factory=XiaoheihePluginSection)
+    basic: XiaoheiheBasicSection = Field(default_factory=XiaoheiheBasicSection)
+    browse: XiaoheiheBrowseSection = Field(default_factory=XiaoheiheBrowseSection)
+    automation: XiaoheiheAutomationSection = Field(default_factory=XiaoheiheAutomationSection)
+    content: XiaoheiheContentSection = Field(default_factory=XiaoheiheContentSection)
+    dm: XiaoheiheDirectMessageSection = Field(default_factory=XiaoheiheDirectMessageSection)
 
     @property
     def enabled(self) -> bool:
-        return self.plugin.enabled
+        return self.basic.enabled
 
     @property
     def profile_id(self) -> str:
-        return self.plugin.profile_id
+        return self.basic.profile_id
 
     @property
     def mode(self) -> str:
-        return self.plugin.mode
+        return self.basic.mode
 
     @property
     def poll_interval_seconds(self) -> int:
-        return self.plugin.poll_interval_seconds
+        return self.browse.poll_interval_seconds
 
     @property
     def feed_interval_seconds(self) -> int:
-        return self.plugin.feed_interval_seconds
+        return self.browse.feed_interval_seconds
 
     @property
     def posts_per_day(self) -> int:
-        return self.plugin.posts_per_day
+        return self.automation.posts_per_day
 
     @property
     def proactive_comments_per_day(self) -> int:
-        return self.plugin.proactive_comments_per_day
+        return self.automation.proactive_comments_per_day
 
     @property
     def notification_replies_per_day(self) -> int:
-        return self.plugin.notification_replies_per_day
+        return self.automation.notification_replies_per_day
 
     @property
     def send_cooldown_seconds(self) -> int:
-        return self.plugin.send_cooldown_seconds
+        return self.automation.send_cooldown_seconds
 
     @property
     def dm_enabled(self) -> bool:
-        return self.plugin.dm_enabled
+        return self.dm.dm_enabled
 
     @property
     def dm_mode(self) -> str:
-        return self.plugin.dm_mode
+        return self.dm.dm_mode
 
     @property
     def dm_poll_interval_seconds(self) -> int:
-        return self.plugin.dm_poll_interval_seconds
+        return self.dm.dm_poll_interval_seconds
 
     @property
     def dm_daily_quota(self) -> int:
-        return self.plugin.dm_daily_quota
+        return self.dm.dm_daily_quota
 
     @property
     def dm_cooldown_seconds(self) -> int:
-        return self.plugin.dm_cooldown_seconds
+        return self.dm.dm_cooldown_seconds
 
     @property
     def dm_max_reply_chars(self) -> int:
-        return self.plugin.dm_max_reply_chars
+        return self.dm.dm_max_reply_chars
 
     @property
     def dm_user_allowlist(self) -> list[str]:
-        return self.plugin.dm_user_allowlist
+        return self.dm.dm_user_allowlist
 
     @property
     def community_allowlist(self) -> list[str]:
-        return self.plugin.community_allowlist
+        return self.automation.community_allowlist
 
     @property
     def generate_post_images(self) -> bool:
-        return self.plugin.generate_post_images
+        return self.content.generate_post_images
 
     @property
     def life_context_api(self) -> str:
-        return self.plugin.life_context_api
+        return self.content.life_context_api
 
     @property
     def identity_reference_api(self) -> str:
-        return self.plugin.identity_reference_api
+        return self.content.identity_reference_api
 
     @property
     def post_topic_ids(self) -> str:
-        return self.plugin.post_topic_ids
+        return self.automation.post_topic_ids
 
     @property
     def game_topic_hints(self) -> list[str]:
-        return self.plugin.game_topic_hints
+        return self.browse.game_topic_hints
 
 
 class XiaoheiheOperatorPlugin(MaiBotPlugin):
     config_model = XiaoheiheConfig
     config_reload_subscriptions: ClassVar[Iterable[str]] = ()
+    _LEGACY_CONFIG_SECTIONS: ClassVar[dict[str, str]] = {
+        "enabled": "basic",
+        "profile_id": "basic",
+        "mode": "basic",
+        "poll_interval_seconds": "browse",
+        "feed_interval_seconds": "browse",
+        "game_topic_hints": "browse",
+        "posts_per_day": "automation",
+        "proactive_comments_per_day": "automation",
+        "notification_replies_per_day": "automation",
+        "send_cooldown_seconds": "automation",
+        "community_allowlist": "automation",
+        "post_topic_ids": "automation",
+        "generate_post_images": "content",
+        "life_context_api": "content",
+        "identity_reference_api": "content",
+        "dm_enabled": "dm",
+        "dm_mode": "dm",
+        "dm_poll_interval_seconds": "dm",
+        "dm_daily_quota": "dm",
+        "dm_cooldown_seconds": "dm",
+        "dm_max_reply_chars": "dm",
+        "dm_user_allowlist": "dm",
+    }
 
     def __init__(self) -> None:
         super().__init__()
@@ -186,6 +385,76 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         self._stop = asyncio.Event()
         self._last_feed_at = 0.0
         self._last_dm_poll_at = 0.0
+
+    @staticmethod
+    def _sanitize_config(config: Any) -> Any:
+        """在 SDK 版本检查前补齐 [plugin].config_version。"""
+
+        if not isinstance(config, Mapping):
+            return config
+        data = dict(config)
+        raw_plugin = data.get("plugin")
+        plugin = dict(raw_plugin) if isinstance(raw_plugin, Mapping) else {}
+        if not str(plugin.get("config_version") or "").strip():
+            plugin["config_version"] = "0.1.0"
+        data["plugin"] = plugin
+        return data
+
+    def normalize_plugin_config(self, config_data: Any) -> tuple[dict[str, Any], bool]:
+        """把旧版扁平 [plugin] 业务字段迁移到新的配置分组。"""
+
+        sanitized = self._sanitize_config(config_data)
+        if not isinstance(sanitized, Mapping):
+            return sanitized, False
+
+        data = dict(sanitized)
+        raw_plugin = data.get("plugin")
+        plugin = dict(raw_plugin) if isinstance(raw_plugin, Mapping) else {}
+        changed = False
+        for field_name, section_name in self._LEGACY_CONFIG_SECTIONS.items():
+            if field_name not in plugin:
+                continue
+            raw_section = data.get(section_name)
+            section = dict(raw_section) if isinstance(raw_section, Mapping) else {}
+            if field_name not in section:
+                section[field_name] = plugin[field_name]
+            data[section_name] = section
+            plugin.pop(field_name, None)
+            changed = True
+        data["plugin"] = plugin
+
+        try:
+            return super().normalize_plugin_config(data)
+        except AttributeError:
+            return data, changed
+
+    def get_webui_config_schema(self, **kwargs: Any) -> dict[str, Any]:
+        """补齐配置页提示，并把暂不使用的私信分组默认收起。"""
+
+        try:
+            schema = super().get_webui_config_schema(**kwargs)
+        except AttributeError:
+            return {"sections": {}}
+        try:
+            sections = schema.get("sections") or {}
+            for name, section in sections.items():
+                if not isinstance(section, dict):
+                    continue
+                if name == "dm":
+                    section["collapsed"] = True
+                    section["order"] = 100 + float(section.get("order") or 0)
+                    section["description"] = (
+                        "当前发布版不提供私信自动发送；只有未来接入稳定发送能力后才需要调整。"
+                    )
+                else:
+                    section["collapsed"] = False
+                for field in (section.get("fields") or {}).values():
+                    if isinstance(field, dict) and field.get("description") and not field.get("hint"):
+                        field["hint"] = field["description"]
+            return schema
+        except Exception:
+            self.ctx.logger.exception("小黑盒配置页显示元数据修正失败，回退原始 Schema")
+            return schema
 
     async def on_load(self) -> None:
         data_dir = Path(self.ctx.paths.data_dir)
@@ -1138,7 +1407,11 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         if self._runtime is None:
             return {"success": False, "message": "插件尚未加载"}
         try:
-            return {"success": True, **(await self._runtime.request_qr())}
+            await self._runtime.request_qr()
+            payload = self._webui_login_payload(
+                {"state": "waiting_scan", "message": "二维码已生成，请使用小黑盒 App 扫码"}
+            )
+            return {"success": True, **payload}
         except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": type(exc).__name__}
 
@@ -1147,7 +1420,14 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         if self._runtime is None:
             return {"success": False, "message": "插件尚未加载"}
         try:
-            return {"success": True, **(await self._runtime.check_qr())}
+            result = await self._runtime.check_qr()
+            safe_result = {
+                key: result.get(key)
+                for key in ("state", "message", "nickname")
+                if key in result
+            }
+            payload = self._webui_login_payload(safe_result)
+            return {"success": True, **payload}
         except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": type(exc).__name__}
 
@@ -1232,12 +1512,22 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
             raise RuntimeError(str(result.get("error") or result.get("message") or "二维码生成失败"))
         return self._webui_login_payload({"state": "waiting_scan", "message": "请使用小黑盒 App 扫码"})
 
-    @Command("xhh_status", pattern=r"^/xhh_status$", permission="operator")
+    @Command(
+        "xhh_status",
+        description="可在 MaiBot 聊天中输入 /xhh_status，查看小黑盒运营插件状态。",
+        pattern=r"^/xhh_status$",
+        permission="operator",
+    )
     async def handle_command(self, **kwargs):
         result = await self.handle_status(**kwargs)
         return True, result["message"], 2
 
-    @Command("xhh_login", pattern=r"^/xhh_login$", permission="operator")
+    @Command(
+        "xhh_login",
+        description="可在 MaiBot 聊天中输入 /xhh_login，生成小黑盒扫码登录信息。",
+        pattern=r"^/xhh_login$",
+        permission="operator",
+    )
     async def handle_login_command(self, **kwargs):
         result = await self.handle_request_login(**kwargs)
         if not result.get("success"):
@@ -1248,7 +1538,12 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
             2,
         )
 
-    @Command("xhh_login_check", pattern=r"^/xhh_login_check$", permission="operator")
+    @Command(
+        "xhh_login_check",
+        description="可在 MaiBot 聊天中输入 /xhh_login_check，检查扫码登录状态。",
+        pattern=r"^/xhh_login_check$",
+        permission="operator",
+    )
     async def handle_login_check_command(self, **kwargs):
         result = await self.handle_check_login(**kwargs)
         return True, f"小黑盒登录状态：{result.get('state', 'unknown')} {result.get('message', '')}", 2

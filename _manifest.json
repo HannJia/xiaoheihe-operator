@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "org.orge-8.xiaoheihe-operator",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "name": "小黑盒运营",
   "description": "将 maibot 的生活轨迹、游戏话题和配图能力接入小黑盒社区。",
   "author": {
@@ -14,7 +14,7 @@
   "license": "MIT",
   "host_application": {
     "min_version": "1.3.6",
-    "max_version": "999.999.999"
+    "max_version": "1.3.99"
   },
   "sdk": {
     "min_version": "2.12.0",
@@ -39,14 +39,12 @@
   ],
   "capabilities": [
     "api.call",
-    "api.list",
-    "config.get",
     "llm.generate"
   ],
   "i18n": {
     "default_locale": "zh-CN"
   },
-  "plugin_type": "extension"
+  "plugin_type": "integration"
 }
 
 

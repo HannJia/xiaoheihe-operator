@@ -131,9 +131,9 @@ class NotificationRetryTests(unittest.TestCase):
     def make_plugin(self, directory: Path, *, quota: int = 1):
         plugin = self.plugin_type()
         plugin.config = plugin.config_model()
-        plugin.config.plugin.mode = "dry_run"
-        plugin.config.plugin.notification_replies_per_day = quota
-        plugin.config.plugin.poll_interval_seconds = 60
+        plugin.config.basic.mode = "dry_run"
+        plugin.config.automation.notification_replies_per_day = quota
+        plugin.config.browse.poll_interval_seconds = 60
         plugin._store = OperatorStore(directory / "state.db")
         plugin._generator = _Generator()
         plugin.ctx = SimpleNamespace(logger=_Logger())
@@ -202,7 +202,7 @@ class NotificationRetryTests(unittest.TestCase):
     def test_attempted_notification_write_is_terminal_and_never_resent(self):
         async def run(directory: Path, status: OutgoingStatus):
             plugin = self.make_plugin(directory, quota=1)
-            plugin.config.plugin.mode = "auto"
+            plugin.config.basic.mode = "auto"
             key = "reply:attempted"
             plugin._store.claim_incoming(
                 "attempted", "reply", {"event_key": "attempted", "post_id": "post-1", "text": "question"}
@@ -266,8 +266,8 @@ class NotificationRetryTests(unittest.TestCase):
     def test_first_real_comment_is_not_blocked_by_its_own_cooldown_record(self):
         async def run(directory: Path):
             plugin = self.make_plugin(directory)
-            plugin.config.plugin.mode = "auto"
-            plugin.config.plugin.send_cooldown_seconds = 120
+            plugin.config.basic.mode = "auto"
+            plugin.config.automation.send_cooldown_seconds = 120
             key = "comment:first"
             plugin._store.begin_outgoing(
                 OutgoingAction(key, "notification_reply", "post-1", "reply", metadata={"post_id": "post-1"})

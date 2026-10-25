@@ -40,9 +40,11 @@ class ExistingContractChecks(unittest.TestCase):
 
     def test_webui_and_qr_checks(self):
         checks = importlib.import_module("test_webui_login")
+        login_safety = importlib.import_module("test_login_tool_safety")
         checks.test_qr_generator_emits_png_data_url_without_external_dependencies()
         checks.test_webui_declares_custom_login_page_and_static_apis()
         checks.test_invalid_credentials_can_be_removed_from_the_profile_store()
+        login_safety.test_login_tool_returns_image_and_status_without_raw_qr_url()
 
     def test_signing_known_vector(self):
         checks = importlib.import_module("test_comment_request_contract")
