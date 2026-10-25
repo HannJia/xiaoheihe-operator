@@ -5,7 +5,7 @@ import hashlib
 import time
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, ClassVar, Iterable
+from typing import Any, ClassVar, Iterable, Literal
 
 from maibot_sdk import API, Command, Field, MaiBotPlugin, PluginConfigBase, Tool
 
@@ -14,6 +14,55 @@ try:
 except ImportError:  # pragma: no cover - local loading stub
     ToolParameterInfo = None  # type: ignore[assignment,misc]
     ToolParamType = None  # type: ignore[assignment,misc]
+
+
+# 这些是用户能在配置页看到的名称。插件会在发送前通过小黑盒的搜索接口
+# 解析为真实 topic_id，避免要求用户手工查找一串数字。
+COMMUNITY_OPTIONS = (
+    "Steam",
+    "PC 游戏",
+    "盒友杂谈",
+    "盒友日常",
+    "主机游戏",
+    "手机游戏",
+    "游戏攻略",
+    "独立游戏",
+    "电竞赛事",
+    "优惠资讯",
+)
+POST_TARGET_OPTIONS = ("",) + COMMUNITY_OPTIONS
+DEFAULT_COMMUNITY_ALLOWLIST = ("PC 游戏", "盒友杂谈")
+MAX_ALLOWLIST_ITEMS = 10
+MAX_POST_TARGETS = 2
+
+# Literal 让 MaiBot SDK 自动生成真正的下拉框和选项；显示给用户的是中文名称，
+# 插件运行时再通过小黑盒搜索接口解析为内部 topic_id。
+CommunityName = Literal[
+    "Steam",
+    "PC 游戏",
+    "盒友杂谈",
+    "盒友日常",
+    "主机游戏",
+    "手机游戏",
+    "游戏攻略",
+    "独立游戏",
+    "电竞赛事",
+    "优惠资讯",
+]
+PostTargetName = Literal[
+    "",
+    "Steam",
+    "PC 游戏",
+    "盒友杂谈",
+    "盒友日常",
+    "主机游戏",
+    "手机游戏",
+    "游戏攻略",
+    "独立游戏",
+    "电竞赛事",
+    "优惠资讯",
+]
+RunMode = Literal["dry_run", "auto"]
 
 try:
     from .drawpic_gateway import DrawingGateway
@@ -70,9 +119,9 @@ class XiaoheiheBasicSection(PluginConfigBase):
 
     enabled: bool = _ui_field(
         label="启用自动运营",
-        hint="关闭时只保留登录和只读检查，不执行自动发帖、评论或回复。",
+        hint="发布版默认开启自动运营；关闭后只保留登录和只读检查，不执行自动发帖、评论或回复。",
         order=0,
-        default=False,
+        default=True,
     )
     profile_id: str = _ui_field(
         label="小黑盒账号档案 ID",
@@ -80,12 +129,12 @@ class XiaoheiheBasicSection(PluginConfigBase):
         order=1,
         default="default",
     )
-    mode: str = _ui_field(
+    mode: RunMode = _ui_field(
         label="运行模式",
-        hint="dry_run 只生成并记录计划；auto 才会向小黑盒发送内容。测试阶段建议保持 dry_run。",
+        hint="请选择 dry_run 或 auto；发布版默认 auto。dry_run 只生成并记录计划，auto 才会向小黑盒发送内容。",
         order=2,
-        default="dry_run",
-        placeholder="dry_run 或 auto",
+        default="auto",
+        placeholder="请选择 dry_run 或 auto",
     )
 
 
@@ -126,9 +175,9 @@ class XiaoheiheAutomationSection(PluginConfigBase):
 
     posts_per_day: int = _ui_field(
         label="每日主动发帖数",
-        hint="每天最多主动发布的帖子数量；设为 0 表示关闭自动发帖。",
+        hint="每天最多主动发布的帖子数量；发布版默认 1。设为 0 表示关闭自动发帖。",
         order=0,
-        default=0,
+        default=1,
         step=1,
     )
     proactive_comments_per_day: int = _ui_field(
@@ -154,39 +203,61 @@ class XiaoheiheAutomationSection(PluginConfigBase):
     )
     community_allowlist: list[str] = _ui_field(
         label="社区白名单",
-        hint="允许浏览和主动互动的社区 ID；留空表示不主动互动。点击添加项目逐条填写。",
+        hint="允许浏览和主动互动的社区；默认包含 PC 游戏、盒友杂谈。最多选择 10 个，留空表示不主动互动。",
         order=4,
-        default_factory=list,
+        default_factory=lambda: list(DEFAULT_COMMUNITY_ALLOWLIST),
+        json_schema_extra={
+            "items": {"type": "string", "enum": list(COMMUNITY_OPTIONS)},
+            "max_items": MAX_ALLOWLIST_ITEMS,
+        },
     )
-    post_topic_ids: str = _ui_field(
-        label="发帖社区/话题 ID",
-        hint="主动发帖使用的社区或话题 ID，多个 ID 用英文逗号分隔；留空表示不自动发帖。",
+    post_target_primary: PostTargetName = _ui_field(
+        label="发帖目标 1（社区/话题）",
+        hint="选择第一个发帖社区或话题；插件会自动解析内部 ID。留空表示不自动发帖。两个目标可以暂时选成一样，发送前会自动去重。",
         order=5,
-        default="",
-        placeholder="例如 12345,67890",
+        default="Steam",
+    )
+    post_target_secondary: PostTargetName = _ui_field(
+        label="发帖目标 2（可选）",
+        hint="可再选择一个与目标 1 不同的社区或话题；小黑盒单条帖子最多选择 2 个目标。若重复选择，发送前会自动去重。留空即可。",
+        order=6,
+        default="PC 游戏",
+    )
+    post_topic_ids: list[str] = _ui_field(
+        label="旧版发帖目标 ID（兼容字段）",
+        hint="旧版数字 ID 配置兼容字段，正常使用请通过上面的中文选项选择。",
+        order=99,
+        default_factory=list,
+        json_schema_extra={"hidden": True},
     )
 
 
 class XiaoheiheContentSection(PluginConfigBase):
+    """内容生成与其它 MaiBot 插件的只读联动配置。
+
+    当前联动插件市场中的「麦麦绘图」「生活频率」「自我身份档案」。
+    API 名称仍按“插件 ID + @API(name=...)”组成，具体获取方法写在各字段提示中。
+    """
+
     __ui_label__ = "内容与插件联动"
     __ui_icon__ = "puzzle"
     __ui_order__ = 4
 
     generate_post_images: bool = _ui_field(
         label="自动生成帖子图片",
-        hint="自动发帖时是否调用生图插件并附带图片；需要已安装并启用生图插件。",
+        hint="联动插件：麦麦绘图（ID：maimai-drawpic-plugin）。开启后调用 drawpic_submit_v2、drawpic_request_v2、drawpic_task_v2、drawpic_image_v2 生成并读取帖子图片；需要已安装并启用该插件。",
         order=0,
         default=True,
     )
     life_context_api: str = _ui_field(
         label="生活轨迹 API",
-        hint="提供当前生活轨迹的 MaiBot API 名称，只读调用；一般无需修改。",
+        hint="联动插件：生活频率（ID：org.orge-8.life-frequency）；当前完整 API 是 org.orge-8.life-frequency.get_current_context，只读调用。获取方法：查看该插件 _manifest.json 的插件 ID，再在源码中查找 @API(name=\"get_current_context\")；一般无需修改。",
         order=1,
         default="org.orge-8.life-frequency.get_current_context",
     )
     identity_reference_api: str = _ui_field(
         label="身份参考图 API",
-        hint="提供生图身份参考图的 MaiBot API 名称，只读调用；一般无需修改。",
+        hint="联动插件：自我身份档案（ID：org.mai-mai.self-identity）；当前完整 API 是 org.mai-mai.self-identity.get_default_reference_image，只读调用。获取方法：查看该插件 _manifest.json 的插件 ID，再在源码中查找 @API(name=\"get_default_reference_image\")；一般无需修改。",
         order=2,
         default="org.mai-mai.self-identity.get_default_reference_image",
     )
@@ -337,8 +408,15 @@ class XiaoheiheConfig(PluginConfigBase):
         return self.content.identity_reference_api
 
     @property
-    def post_topic_ids(self) -> str:
-        return self.automation.post_topic_ids
+    def post_topic_ids(self) -> list[str]:
+        selected = [
+            str(self.automation.post_target_primary or "").strip(),
+            str(self.automation.post_target_secondary or "").strip(),
+        ]
+        selected = [item for item in selected if item]
+        if selected:
+            return list(dict.fromkeys(selected))[:MAX_POST_TARGETS]
+        return list(self.automation.post_topic_ids)
 
     @property
     def game_topic_hints(self) -> list[str]:
@@ -360,6 +438,8 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         "notification_replies_per_day": "automation",
         "send_cooldown_seconds": "automation",
         "community_allowlist": "automation",
+        "post_target_primary": "automation",
+        "post_target_secondary": "automation",
         "post_topic_ids": "automation",
         "generate_post_images": "content",
         "life_context_api": "content",
@@ -385,6 +465,7 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         self._stop = asyncio.Event()
         self._last_feed_at = 0.0
         self._last_dm_poll_at = 0.0
+        self._topic_id_cache: dict[str, str] = {}
 
     @staticmethod
     def _sanitize_config(config: Any) -> Any:
@@ -421,6 +502,31 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
             data[section_name] = section
             plugin.pop(field_name, None)
             changed = True
+        automation = data.get("automation")
+        if isinstance(automation, Mapping):
+            normalized_automation = dict(automation)
+            raw_targets = normalized_automation.get("post_topic_ids")
+            if isinstance(raw_targets, str):
+                legacy_targets = [
+                    item.strip()
+                    for item in raw_targets.replace("，", ",").split(",")
+                    if item.strip()
+                ]
+                normalized_automation["post_topic_ids"] = legacy_targets
+                data["automation"] = normalized_automation
+                changed = True
+            else:
+                legacy_targets = list(raw_targets) if isinstance(raw_targets, list) else []
+            # 数字 ID 继续保存在兼容字段中；不要把它写进 Literal 下拉字段，
+            # 否则旧配置会在 Pydantic 校验阶段被拒绝。新配置直接从中文选项选择。
+            if legacy_targets and not str(normalized_automation.get("post_target_primary") or "").strip():
+                named_targets = [item for item in legacy_targets if item in POST_TARGET_OPTIONS]
+                if named_targets:
+                    normalized_automation["post_target_primary"] = named_targets[0]
+                    if len(named_targets) > 1 and not str(normalized_automation.get("post_target_secondary") or "").strip():
+                        normalized_automation["post_target_secondary"] = named_targets[1]
+                    data["automation"] = normalized_automation
+                    changed = True
         data["plugin"] = plugin
 
         try:
@@ -448,9 +554,19 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
                     )
                 else:
                     section["collapsed"] = False
-                for field in (section.get("fields") or {}).values():
+                for field_name, field in (section.get("fields") or {}).items():
                     if isinstance(field, dict) and field.get("description") and not field.get("hint"):
                         field["hint"] = field["description"]
+                    # Radix Select 禁止 Select.Item 使用空字符串，但空值本身仍然
+                    # 可以作为 value 显示 placeholder。因此保留字段默认空值，
+                    # 只从选项列表中移除空项，用户仍可通过清空输入保持不发帖。
+                    if (
+                        name == "automation"
+                        and field_name in {"post_target_primary", "post_target_secondary"}
+                        and isinstance(field, dict)
+                        and isinstance(field.get("choices"), list)
+                    ):
+                        field["choices"] = [choice for choice in field["choices"] if str(choice) != ""]
             return schema
         except Exception:
             self.ctx.logger.exception("小黑盒配置页显示元数据修正失败，回退原始 Schema")
@@ -1165,12 +1281,16 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
             author = item.get("author") if isinstance(item.get("author"), dict) else {}
             if str(author.get("uid") or author.get("userid") or "") == str(self._runtime.credentials.uid):
                 return False
-        allowlist = {str(value).strip() for value in self.config.community_allowlist if str(value).strip()}
+        allowlist_values = _normalize_selection_values(
+            self.config.community_allowlist,
+            max_items=MAX_ALLOWLIST_ITEMS,
+        )
+        allowlist = {_normalize_selection_name(value) for value in allowlist_values}
         if not allowlist:
             return False
         values = {str(item.get(key) or "") for key in ("community_id", "topic_id", "section_id", "link_tag")}
         values.update(str(value) for value in item.get("section_names", []) if value)
-        if not values.intersection(allowlist):
+        if not {_normalize_selection_name(value) for value in values}.intersection(allowlist):
             return False
         text = " ".join(
             str(item.get(key) or "") for key in ("title", "subject", "content", "description", "text")
@@ -1215,11 +1335,18 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
     async def _create_proactive_post(self, client) -> None:
         if self._store is None or self._generator is None or self._persona is None:
             return
-        topic_ids = _normalize_topic_ids(self.config.post_topic_ids)
-        if not topic_ids:
+        raw_targets = _normalize_selection_values(self.config.post_topic_ids, max_items=None)
+        targets = raw_targets[:MAX_POST_TARGETS]
+        if not targets:
             return
-        if len(topic_ids) > 2:
-            self.ctx.logger.warning("小黑盒单条帖子最多选择 2 个分区，已跳过超限配置")
+        if len(raw_targets) > MAX_POST_TARGETS:
+            self.ctx.logger.warning("小黑盒单条帖子最多选择 2 个分区，已使用前 2 个配置")
+        try:
+            topic_ids = await self._resolve_post_topic_ids(client, targets)
+        except Exception as exc:  # noqa: BLE001
+            self.ctx.logger.warning("小黑盒发帖目标解析失败：%s", type(exc).__name__)
+            return
+        if not topic_ids:
             return
         topic_id_value = ",".join(topic_ids)
         if not self._cooldown_ready():
@@ -1351,6 +1478,18 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
                 str(getattr(exc, "status_code", "")),
                 str(exc)[:180],
             )
+
+    async def _resolve_post_topic_ids(self, client, targets: list[str]) -> list[str]:
+        """Resolve friendly config options while retaining old numeric IDs."""
+
+        numeric_ids = [item for item in targets if item.isdigit()]
+        names = [item for item in targets if not item.isdigit()]
+        if names:
+            missing = [name for name in names if name not in self._topic_id_cache]
+            if missing:
+                self._topic_id_cache.update(await client.resolve_topic_names(missing))
+            numeric_ids.extend(self._topic_id_cache.get(name, "") for name in names)
+        return list(dict.fromkeys(item for item in numeric_ids if item.isdigit()))
 
     async def _retry_pre_send_proactive_posts(self, client) -> None:
         """Retry an action only when no external post request was started."""
@@ -1562,13 +1701,26 @@ def _task_id(value: object) -> str:
     return ""
 
 
-def _normalize_topic_ids(value: object) -> list[str]:
+def _normalize_selection_values(value: object, *, max_items: int | None) -> list[str]:
     result: list[str] = []
-    for item in str(value or "").replace("，", ",").split(","):
-        token = item.strip()
-        if token and token.isdigit() and token not in result:
+    raw_values = value if isinstance(value, list | tuple | set) else str(value or "").replace("，", ",").split(",")
+    for item in raw_values:
+        token = str(item or "").strip()
+        if token and token not in result:
             result.append(token)
+        if max_items is not None and len(result) >= max_items:
+            break
     return result
+
+
+def _normalize_selection_name(value: object) -> str:
+    return "".join(str(value or "").split()).casefold()
+
+
+def _normalize_topic_ids(value: object) -> list[str]:
+    """Backward-compatible helper for old callers that supplied numeric IDs."""
+
+    return [item for item in _normalize_selection_values(value, max_items=None) if item.isdigit()]
 
 
 def _same_post_content(

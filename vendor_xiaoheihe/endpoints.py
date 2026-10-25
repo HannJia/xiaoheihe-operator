@@ -24,6 +24,7 @@ class EndpointName(StrEnum):
     UPLOAD_CALLBACK = "upload_callback"
     RECENT_COMMENTS = "recent_comments"
     FEED = "feed"
+    TOPIC_SELECTION_SEARCH = "topic_selection_search"
     TOPIC_INDEX = "topic_index"
     TOPIC_FEED = "topic_feed"
     DIRECT_MESSAGE_INBOX = "direct_message_inbox"
@@ -87,6 +88,9 @@ ENDPOINTS: dict[EndpointName, Endpoint] = {
     ),
     EndpointName.RECENT_COMMENTS: Endpoint("GET", "/bbs/app/comment/user", True, True),
     EndpointName.FEED: Endpoint("GET", "/bbs/app/feeds", True, True),
+    EndpointName.TOPIC_SELECTION_SEARCH: Endpoint(
+        "GET", "/bbs/app/api/post_editor/topic_selection/search", True, True
+    ),
     EndpointName.TOPIC_INDEX: Endpoint("GET", "/bbs/app/api/topic/index/", True, True),
     EndpointName.TOPIC_FEED: Endpoint("GET", "/bbs/app/topic/feeds", True, True),
     # These private-message routes are read-only probes until the live

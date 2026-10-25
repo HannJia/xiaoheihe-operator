@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "org.orge-8.xiaoheihe-operator",
-  "version": "0.2.9",
+  "version": "0.3.8",
   "name": "小黑盒运营",
   "description": "将 maibot 的生活轨迹、游戏话题和配图能力接入小黑盒社区。",
   "author": {
@@ -46,6 +46,3 @@
   },
   "plugin_type": "integration"
 }
-
-
-

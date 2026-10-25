@@ -2,19 +2,21 @@
 
 这个插件把 maibot 的生活轨迹、游戏话题和绘图能力接入小黑盒。它使用 MaiBot 官方插件 Runner、独立 SQLite 状态库和小黑盒客户端，不修改 QQ 主链数据。
 
-## 默认安全状态
+## 默认运营状态
 
-`config.toml` 默认是 `enabled = false`、`mode = "dry_run"`。完成账号登录、只读接口验收和低额度测试前，不应开启真实自动运营。
+发布版默认是 `enabled = true`、`mode = "auto"`、每天最多主动发 1 帖，并使用 Steam + PC 游戏作为默认发帖目标。首次安装或更换账号后，应先确认登录状态、社区目标和内容边界；需要只读验收时，把运行模式改成 `dry_run` 或把每日额度设为 0。
 
 主要限制包括每日发帖/评论/通知回复配额、账号级冷却、社区白名单、内容重复键、敏感/技术内容拦截、发送结果未知状态以及认证失效和限流退避。
 
 ## 配置说明
 
-MaiBot WebUI 的插件配置页会显示每个字段的中文用途说明。第一次验收应保持 `enabled = true`、`mode = dry_run`、`feed_interval_seconds = 3600`、`posts_per_day = 0`、`proactive_comments_per_day = 1`、`notification_replies_per_day = 1`。确认请求契约和读回核验后，再由管理员明确切换到 `auto`。
+MaiBot WebUI 的插件配置页会显示每个字段的中文用途说明。`auto` 只有在插件启用、每日发帖数大于 0 且至少选择一个发帖目标时才会真实发帖；`dry_run` 只生成计划，不产生小黑盒写入。
 
 私信功能不属于当前发布范围，默认关闭。小黑盒私信发送依赖独立的客户端聊天界面，当前没有稳定、可复用的公开发送契约；插件不会把私信误判成评论，也不会盲目重试发送。未来方案和取舍见 [私信方案记录](docs/PRIVATE_MESSAGE_OPTIONS.md)。
 
-主动运营默认 fail-closed：`community_allowlist` 为空时不主动评论，`post_topic_ids` 为空时不主动发帖；通知回复仍只处理账号相关通知。
+主动运营默认 fail-closed：`community_allowlist` 默认是“PC 游戏”和“盒友杂谈”，只允许在游戏相关社区筛选和互动；`post_topic_ids` 为空时不主动发帖。配置页使用中文选项，插件会在发送前按准确名称查询小黑盒并解析内部 topic ID，不要求用户手工填写数字。
+
+社区配置限制：白名单最多选择 10 个社区；配置页提供两个发帖目标下拉框，因此单条主动帖子最多选择 2 个社区或话题，这是小黑盒发帖接口的分区限制。两个目标即使选成一样，发送前也会自动去重。发帖目标解析失败时会跳过本轮发送，不会把内容发到不确定的分区。旧版配置中的数字 ID 仍可读取，旧版逗号分隔字符串会自动迁移到两个目标选项。
 
 评论回复会先读取原帖标题、正文和收到的评论，再交给内容生成器，因此 maibot 在自己发布的帖子下回复时会围绕该帖内容作答。当前已支持小黑盒通知中心里的提及、评论和楼中楼回复；私信保持关闭。当前开发状态和已知限制见 [项目状态](docs/PROJECT_STATUS.md)。
 
@@ -32,7 +34,9 @@ MaiBot WebUI 的插件配置页会显示每个字段的中文用途说明。第�
 
 ## 联动
 
-生活轨迹通过 `org.orge-8.life-frequency.get_current_context` 只读 API 获取；身份参考图通过 `org.mai-mai.self-identity.get_default_reference_image` 获取；主动帖子配图通过 `maimai-drawpic-plugin` 的 v2 API 提交、恢复和读取。`org.orge-8.life-frequency`、`org.mai-mai.self-identity` 和 `maimai-drawpic-plugin` 都必须按 `_manifest.json` 中的依赖安装。
+生活轨迹通过插件市场的「生活频率」（ID：`org.orge-8.life-frequency`）提供的 `get_current_context` 只读 API 获取；身份参考图通过「自我身份档案」（ID：`org.mai-mai.self-identity`）的 `get_default_reference_image` 获取；主动帖子配图通过「麦麦绘图」（ID：`maimai-drawpic-plugin`）的 `drawpic_submit_v2`、`drawpic_request_v2`、`drawpic_task_v2` 和 `drawpic_image_v2` API 提交、恢复、轮询和读取。三个插件都必须按 `_manifest.json` 中的依赖安装。
+
+API 名称的组成规则是“插件 ID + `@API(name=...)` 中的名称”。获取方法：先查看提供方插件 `_manifest.json` 的 `id`，再在该插件源码中搜索 `@API(name="...")`，最后按 `插件 ID.名称` 填入配置。当前插件已经填好可用的完整名称；只有更换提供方插件或 API 版本时才需要修改。
 
 ## 外部数据处理
 
@@ -53,8 +57,8 @@ MaiBot WebUI 的插件配置页会显示每个字段的中文用途说明。第�
 - `Insect-rippler/XIAOHEIHE_MCP`：参考评论上下文、搜索、发布和签名测试的接口分层；不复制其代码。
 - `lumingfei004/dph-heybox`、`Whereis-Alice/astrbot_plugin_xhhrobot`、`fbbDirge/dsh-xhh`：参考调度、自动浏览、私信状态隔离和生成防护；不复制其代码。
 - `k1m0206/better-XiaoHeiHe`：交叉核对网页端请求参数与 v15 签名；不复制其代码。
-- `maimai-drawpic-plugin`：通过已安装插件公开的 `drawpic_submit_v2`、`drawpic_request_v2`、`drawpic_task_v2` 和 `drawpic_image_v2` API 联动，不复制其实现。
-- `org.orge-8.life-frequency` 与 `org.mai-mai.self-identity`：作为 MaiBot 插件间只读 API 依赖，分别提供生活轨迹和身份参考图。
+- `maimai-drawpic-plugin`（插件市场名「麦麦绘图」）：通过已安装插件公开的 `drawpic_submit_v2`、`drawpic_request_v2`、`drawpic_task_v2` 和 `drawpic_image_v2` API 联动，不复制其实现。
+- `org.orge-8.life-frequency`（插件市场名「生活频率」）与 `org.mai-mai.self-identity`（插件市场名「自我身份档案」）：作为 MaiBot 插件间只读 API 依赖，分别提供生活轨迹和身份参考图。
 - 图片上传：生成图和身份参考图会通过小黑盒接口上传到其腾讯云 COS；上传主机和媒体 URL 会经过 HTTPS、域名和公网地址校验。
 
 本项目使用 MIT License；第三方许可和来源说明见 `THIRD_PARTY_NOTICES.md`。
@@ -66,5 +70,6 @@ MaiBot WebUI 的插件配置页会显示每个字段的中文用途说明。第�
 ## 当前发布范围
 
 - 已纳入：扫码登录、推荐流定时浏览、游戏话题筛选、图文发帖、评论和楼中楼回复、配额/冷却/幂等/读回核验、生活轨迹和生图插件联动。
-- 默认关闭：真实自动运营、主动发帖和私信功能。真实写入应先使用低额度配置验收。
+- 默认开启：低额度真实自动运营，默认每天最多发 1 帖，目标为 Steam + PC 游戏。
+- 默认关闭：私信功能。真实写入前仍应确认账号登录、目标社区和生成内容符合预期。
 - 暂不纳入：手机模拟器或实体手机代理。相关方案只记录在文档中，不会在插件市场版本中偷偷启用。

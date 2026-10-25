@@ -96,6 +96,10 @@ class SendUncertainError(XiaoheiheApiError):
     """A comment request timed out after dispatch and must not be blindly retried."""
 
 
+def _compact_topic_name(value: object) -> str:
+    return "".join(str(value or "").split()).casefold()
+
+
 @dataclass(slots=True)
 class ApiResponse:
     payload: Mapping[str, Any]
@@ -613,6 +617,52 @@ class XiaoheiheApiClient:
             return parse_feed(response.payload, offset=max(0, offset))
         except ResponseShapeError as exc:
             raise ResponseContractError(str(exc), category="response_shape") from exc
+
+    async def resolve_topic_names(self, names: list[str]) -> dict[str, str]:
+        """Resolve configured Chinese topic names to Xiaoheihe topic IDs.
+
+        Only exact, unique names are accepted. Falling back to the first search
+        result would make a typo publish into an unintended community.
+        """
+
+        resolved: dict[str, str] = {}
+        for raw_name in names:
+            name = str(raw_name or "").strip()
+            if not name or name in resolved:
+                continue
+            response = await self._request(
+                EndpointName.TOPIC_SELECTION_SEARCH,
+                params={"q": name, "only_hashtag": "0"},
+            )
+            result = response.payload.get("result", response.payload.get("data", response.payload))
+            items = result.get("search_result", []) if isinstance(result, Mapping) else []
+            exact_matches: list[str] = []
+            normalized_matches: list[str] = []
+            for item in items if isinstance(items, list) else []:
+                if not isinstance(item, Mapping):
+                    continue
+                item_name = str(item.get("name") or item.get("title") or "").strip()
+                search_type = str(item.get("search_type") or "").strip().lower()
+                topic_id = str(item.get("topic_id") or item.get("id") or "").strip()
+                if item_name == name and search_type in {"topic", "community"} and topic_id.isdigit():
+                    if topic_id not in exact_matches:
+                        exact_matches.append(topic_id)
+                elif (
+                    _compact_topic_name(item_name) == _compact_topic_name(name)
+                    and search_type in {"topic", "community"}
+                    and topic_id.isdigit()
+                    and topic_id not in normalized_matches
+                ):
+                    normalized_matches.append(topic_id)
+            matches = exact_matches or normalized_matches
+            if len(matches) != 1:
+                raise ResponseContractError(
+                    f"小黑盒社区或话题“{name}”不存在或结果不唯一",
+                    category="topic_selection",
+                    details={"name": name, "match_count": len(matches)},
+                )
+            resolved[name] = matches[0]
+        return resolved
 
     async def _request(
         self,
