@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.9 - 2026-10-26
+
+- Changed the new-install recommendation flow interval default to 600 seconds (10 minutes).
+- Clarified that 600 seconds is the plugin's recommended default, not an official Xiaoheihe polling interval.
+- Set the SDK compatibility upper bound to the tested 2.12.x line.
+
 ## 0.3.8 - 2026-10-26
 
 - Changed the run-mode field from free text to a `dry_run` / `auto` dropdown.

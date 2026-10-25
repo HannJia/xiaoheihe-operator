@@ -57,5 +57,8 @@ def test_plugin_module_loads_with_runner_sdk_surface():
     assert module.create_plugin().__class__.__name__ == "XiaoheiheOperatorPlugin"
     config = module.XiaoheiheConfig()
     assert config.plugin.config_version == "0.1.0"
-    assert config.enabled is False
-    assert config.mode == "dry_run"
+    assert config.enabled is True
+    assert config.mode == "auto"
+    assert config.browse.feed_interval_seconds == 600
+    assert config.automation.posts_per_day == 1
+    assert config.post_topic_ids == ["Steam", "PC 游戏"]

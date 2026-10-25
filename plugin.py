@@ -152,9 +152,9 @@ class XiaoheiheBrowseSection(PluginConfigBase):
     )
     feed_interval_seconds: int = _ui_field(
         label="推荐流浏览间隔（秒）",
-        hint="读取推荐流的间隔；3600 秒就是 60 分钟，可降低请求和模型消耗。",
+        hint="读取推荐流的间隔；发布版推荐 600 秒（10 分钟），可按账号活跃度和模型额度自行调整。",
         order=1,
-        default=3600,
+        default=600,
         step=300,
     )
     game_topic_hints: list[str] = _ui_field(
@@ -1532,7 +1532,7 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
             },
             "settings_help": {
                 "mode": "dry_run 只记录计划；auto 才会真实发送",
-                "feed_interval_seconds": "推荐 3600 秒，即每 60 分钟浏览一次",
+                "feed_interval_seconds": "推荐 600 秒，即每 10 分钟浏览一次；这是插件默认建议，不是小黑盒官方固定检查时间",
                 "posts_per_day": "建议测试阶段保持 0",
                 "notification_replies_per_day": "建议从 1 开始，确认链路后再增加",
                 "dm_user_allowlist": "私信功能暂不启用；保留字段仅用于兼容旧配置",
