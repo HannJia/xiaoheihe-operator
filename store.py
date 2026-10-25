@@ -40,7 +40,11 @@ class OperatorStore:
                 kind TEXT NOT NULL,
                 payload_json TEXT NOT NULL,
                 created_at REAL NOT NULL,
-                claimed_at REAL
+                claimed_at REAL,
+                state TEXT NOT NULL DEFAULT 'done',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at REAL NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS outgoing_actions (
                 action_key TEXT PRIMARY KEY,
@@ -59,6 +63,36 @@ class OperatorStore:
             CREATE INDEX IF NOT EXISTS idx_outgoing_created ON outgoing_actions(created_at);
             """
         )
+        columns = {str(row[1]) for row in self._conn.execute("PRAGMA table_info(incoming_events)")}
+        migrated_claims = "state" not in columns
+        if migrated_claims:
+            self._conn.execute(
+                "ALTER TABLE incoming_events ADD COLUMN state TEXT NOT NULL DEFAULT 'done'"
+            )
+            self._conn.execute(
+                "ALTER TABLE incoming_events ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0"
+            )
+            self._conn.execute(
+                "ALTER TABLE incoming_events ADD COLUMN next_attempt_at REAL NOT NULL DEFAULT 0"
+            )
+            self._conn.execute(
+                "ALTER TABLE incoming_events ADD COLUMN last_error TEXT NOT NULL DEFAULT ''"
+            )
+            # Older releases recorded an event as claimed before attempting its
+            # reply. Recover recent orphaned claims once, without reopening an
+            # action that was already sent, dry-run, suppressed, or uncertain.
+            self._conn.execute(
+                """
+                UPDATE incoming_events
+                SET state='pending', next_attempt_at=0, last_error='recovered_unfinished'
+                WHERE created_at >= ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM outgoing_actions
+                    WHERE outgoing_actions.action_key = 'reply:' || incoming_events.event_key
+                  )
+                """,
+                (time.time() - 48 * 60 * 60,),
+            )
         self._conn.commit()
 
     def get_cursor(self, profile_id: str, kind: str) -> tuple[str, bool]:
@@ -82,17 +116,115 @@ class OperatorStore:
         )
         self._conn.commit()
 
+    def remember_incoming_baseline(
+        self, event_key: str, kind: str, payload: dict[str, Any]
+    ) -> None:
+        """Record a notification already present when polling is initialized."""
+        now = time.time()
+        self._conn.execute(
+            """
+            INSERT OR IGNORE INTO incoming_events(
+                event_key, kind, payload_json, created_at, claimed_at, state
+            ) VALUES (?, ?, ?, ?, ?, 'done')
+            """,
+            (event_key, kind, json.dumps(payload, ensure_ascii=False), now, now),
+        )
+        self._conn.commit()
+
+    def has_incoming(self, event_key: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM incoming_events WHERE event_key=? LIMIT 1", (event_key,)
+        ).fetchone()
+        return row is not None
+
     def claim_incoming(self, event_key: str, kind: str, payload: dict[str, Any]) -> bool:
         now = time.time()
         try:
             self._conn.execute(
-                "INSERT INTO incoming_events(event_key, kind, payload_json, created_at, claimed_at) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO incoming_events(event_key, kind, payload_json, created_at, claimed_at, state) VALUES (?, ?, ?, ?, ?, 'pending')",
                 (event_key, kind, json.dumps(payload, ensure_ascii=False), now, now),
             )
             self._conn.commit()
             return True
         except sqlite3.IntegrityError:
             return False
+
+    def mark_incoming_done(self, event_key: str, *, state: str = "done") -> None:
+        self._conn.execute(
+            "UPDATE incoming_events SET state=?, last_error='', next_attempt_at=0 WHERE event_key=?",
+            (state, event_key),
+        )
+        self._conn.commit()
+
+    def defer_incoming(
+        self,
+        event_key: str,
+        error: str,
+        *,
+        delay_seconds: float = 60,
+        increment_attempt: bool = True,
+        max_attempts: int = 8,
+    ) -> None:
+        bump = 1 if increment_attempt else 0
+        self._conn.execute(
+            """
+            UPDATE incoming_events
+            SET attempts=attempts+?,
+                state=CASE WHEN attempts+? >= ? THEN 'failed' ELSE 'pending' END,
+                next_attempt_at=CASE WHEN attempts+? >= ? THEN 0 ELSE ? END,
+                last_error=?
+            WHERE event_key=?
+            """,
+            (
+                bump,
+                bump,
+                max(1, max_attempts),
+                bump,
+                max(1, max_attempts),
+                time.time() + max(1, delay_seconds),
+                str(error)[:300],
+                event_key,
+            ),
+        )
+        self._conn.commit()
+
+    def list_pending_incoming(
+        self, *, kind: str | None = None, limit: int = 50, now: float | None = None
+    ) -> list[dict[str, Any]]:
+        current = time.time() if now is None else now
+        bounded_limit = max(1, min(limit, 200))
+        if kind is None:
+            rows = self._conn.execute(
+                "SELECT * FROM incoming_events WHERE state='pending' AND next_attempt_at<=? ORDER BY created_at ASC LIMIT ?",
+                (current, bounded_limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM incoming_events WHERE state='pending' AND next_attempt_at<=? AND kind=? ORDER BY created_at ASC LIMIT ?",
+                (current, kind, bounded_limit),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["payload"] = json.loads(str(item.pop("payload_json", "{}")))
+            except json.JSONDecodeError:
+                item["payload"] = {}
+            result.append(item)
+        return result
+
+    def get_incoming(self, event_key: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM incoming_events WHERE event_key=? LIMIT 1", (event_key,)
+        ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        try:
+            item["payload"] = json.loads(str(item.pop("payload_json", "{}")))
+        except json.JSONDecodeError:
+            item["payload"] = {}
+        return item
 
     def begin_outgoing(self, action: OutgoingAction) -> bool:
         now = time.time()
@@ -156,32 +288,52 @@ class OperatorStore:
 
     def count_since(self, kind: str, since: float) -> int:
         row = self._conn.execute(
-            "SELECT COUNT(*) AS count FROM outgoing_actions WHERE kind=? AND created_at>=? AND status NOT IN (?, ?)",
-            (kind, since, OutgoingStatus.SUPPRESSED.value, OutgoingStatus.FAILED.value),
+            "SELECT COUNT(*) AS count FROM outgoing_actions WHERE kind=? AND created_at>=? AND status NOT IN (?, ?, ?)",
+            (
+                kind,
+                since,
+                OutgoingStatus.SUPPRESSED.value,
+                OutgoingStatus.FAILED.value,
+                OutgoingStatus.DRY_RUN.value,
+            ),
         ).fetchone()
         return int(row["count"] if row else 0)
 
-    def last_outgoing_at(self, kind: str | None = None) -> float | None:
+    def last_outgoing_at(
+        self,
+        kind: str | None = None,
+        *,
+        target_id: str | None = None,
+        exclude_action_key: str = "",
+    ) -> float | None:
         """Return the most recent non-terminal outgoing timestamp."""
+        params: list[object] = []
+        clauses = [
+            "status NOT IN (?, ?, ?)",
+        ]
+        params.extend(
+            [
+                OutgoingStatus.SUPPRESSED.value,
+                OutgoingStatus.FAILED.value,
+                OutgoingStatus.DRY_RUN.value,
+            ]
+        )
         if kind:
-            row = self._conn.execute(
-                """
-                SELECT updated_at FROM outgoing_actions
-                WHERE kind=? AND status NOT IN (?, ?)
-                ORDER BY updated_at DESC LIMIT 1
-                """,
-                (kind, OutgoingStatus.SUPPRESSED.value, OutgoingStatus.FAILED.value),
-            ).fetchone()
-        else:
-            row = self._conn.execute(
-                """
-                SELECT updated_at FROM outgoing_actions
-                WHERE status NOT IN (?, ?)
-                ORDER BY updated_at DESC LIMIT 1
-                """,
-                (OutgoingStatus.SUPPRESSED.value, OutgoingStatus.FAILED.value),
-            ).fetchone()
-        return float(row["created_at"]) if row else None
+            clauses.append("kind=?")
+            params.append(kind)
+        if target_id is not None:
+            clauses.append("target_id=?")
+            params.append(str(target_id))
+        if exclude_action_key:
+            clauses.append("action_key<>?")
+            params.append(exclude_action_key)
+        query = (
+            "SELECT updated_at FROM outgoing_actions WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY updated_at DESC LIMIT 1"
+        )
+        row = self._conn.execute(query, tuple(params)).fetchone()
+        return float(row["updated_at"]) if row else None
 
     def has_outgoing_key(self, action_key: str) -> bool:
         row = self._conn.execute(
@@ -189,6 +341,19 @@ class OperatorStore:
             (action_key,),
         ).fetchone()
         return row is not None
+
+    def get_outgoing(self, action_key: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM outgoing_actions WHERE action_key=? LIMIT 1", (action_key,)
+        ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        try:
+            item["metadata"] = json.loads(str(item.pop("metadata_json", "{}")))
+        except json.JSONDecodeError:
+            item["metadata"] = {}
+        return item
 
     def list_outgoing(self, *, status: OutgoingStatus | None = None, limit: int = 50) -> list[dict[str, Any]]:
         if status is None:

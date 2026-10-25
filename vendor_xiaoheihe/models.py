@@ -260,3 +260,27 @@ class ApiPage:
     items: list[dict[str, Any]]
     next_cursor: str = ""
     has_more: bool = False
+
+
+@dataclass(slots=True)
+class DirectMessage:
+    """Normalized private message used by the isolated DM pipeline."""
+
+    profile_id: str
+    message_id: str
+    conversation_id: str
+    sender_uid: str
+    sender_name: str
+    text: str
+    created_at: float
+    incoming: bool
+    peer_uid: str = ""
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class DirectMessagePage:
+    items: list[DirectMessage]
+    next_cursor: str = ""
+    has_more: bool = False
+    source: str = ""

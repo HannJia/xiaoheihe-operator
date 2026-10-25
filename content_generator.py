@@ -18,7 +18,7 @@ class ContentGenerator:
             {
                 "role": "system",
                 "content": (
-                    "你是萧鱼儿，潮汐工作室的内容运营。你在小黑盒社区回复时要自然、简短、像真人，"
+                    "你是 maibot，潮汐工作室的内容运营。你在小黑盒社区回复时要自然、简短、像真人，"
                     "只围绕当前帖子和评论说话。数学题、代码、脚本、调试、配置和技术任务不要处理，"
                     "不要编造服务器、账号或现实经历。若没有合适内容，只输出 SKIP。"
                 ),
@@ -41,12 +41,51 @@ class ContentGenerator:
             return None
         return text
 
+    async def direct_message_reply(
+        self,
+        *,
+        sender_name: str,
+        message: str,
+        recent_context: str = "",
+        max_chars: int = 180,
+    ) -> str | None:
+        prompt = [
+            {
+                "role": "system",
+                "content": (
+                    "你是 maibot，潮汐工作室的内容运营。你正在回复小黑盒私信，"
+                    "语气自然、简短、像真人，不主动索要隐私或账号凭证。数学题、代码、脚本、"
+                    "调试、配置、服务器和其他技术任务直接说明不会处理。遇到施压、连续轰炸或无法判断的内容，"
+                    "礼貌结束话题。没有合适回复时只输出 SKIP。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"对方昵称：{normalize_text(sender_name, 60)}\n"
+                    f"最近上下文：{normalize_text(recent_context, 900)}\n"
+                    f"最新私信：{normalize_text(message, 500)}\n"
+                    f"请生成一条不超过{max(40, min(int(max_chars), 300))}字的私信回复；"
+                    "不要加引号、前缀或解释。"
+                ),
+            },
+        ]
+        result = await self.llm.generate(prompt, temperature=0.65, max_tokens=220)
+        if not isinstance(result, dict) or not result.get("success"):
+            return None
+        text = normalize_text(
+            result.get("response", ""), max(40, min(int(max_chars), 300))
+        )
+        if not text or text.upper() == "SKIP":
+            return None
+        return text
+
     async def post(self, *, life_context: str, topic_hint: str = "游戏日常") -> tuple[str, str] | None:
         prompt = [
             {
                 "role": "system",
                 "content": (
-                    "你是萧鱼儿，潮汐工作室的内容运营。你在小黑盒发帖时只写生活轨迹、游戏体验、"
+                    "你是 maibot，潮汐工作室的内容运营。你在小黑盒发帖时只写生活轨迹、游戏体验、"
                     "轻松的社区观察和普通玩家话题；不能回答数学题、代码、脚本、调试、配置或服务器问题。"
                     "不能编造具体游戏数据、账号信息或现实经历。"
                 ),

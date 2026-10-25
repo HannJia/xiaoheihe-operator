@@ -9,6 +9,7 @@ class OutgoingStatus(StrEnum):
     PLANNED = "planned"
     DRY_RUN = "dry_run"
     ACCEPTED = "accepted"
+    SENDING = "sending"
     VERIFIED = "verified"
     SEND_UNKNOWN = "send_unknown"
     FAILED = "failed"

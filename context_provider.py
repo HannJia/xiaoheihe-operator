@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import binascii
 import time
-from pathlib import Path
 from typing import Any
 
 try:
@@ -94,9 +93,6 @@ def _extract_image_bytes(value: Any) -> bytes | None:
                 result = _extract_image_bytes(value[key])
                 if result:
                     return result
-        path = value.get("path") or value.get("file_path")
-        if isinstance(path, str):
-            return _read_image_path(path)
     elif isinstance(value, list):
         for item in value:
             result = _extract_image_bytes(item)
@@ -113,13 +109,3 @@ def _extract_image_bytes(value: Any) -> bytes | None:
         if 32 <= len(decoded) <= 12 * 1024 * 1024:
             return decoded
     return None
-
-
-def _read_image_path(path: str) -> bytes | None:
-    candidate = Path(path)
-    try:
-        if not candidate.is_file() or candidate.stat().st_size > 12 * 1024 * 1024:
-            return None
-        return candidate.read_bytes()
-    except OSError:
-        return None

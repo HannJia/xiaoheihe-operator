@@ -24,11 +24,13 @@ from .models import (
     QRLoginSession,
     RoutingTarget,
     SendResult,
+    DirectMessagePage,
     ThreadContext,
 )
 from .parsers import (
     ResponseShapeError,
     parse_credentials,
+    parse_direct_message_page,
     parse_feed,
     parse_login_state,
     parse_notifications,
@@ -41,6 +43,7 @@ from .request_signing import (
     RequestSigner,
     ensure_client_identity,
     generate_device_id,
+    generate_workshop_rnd,
 )
 from .security import redact_data
 
@@ -51,7 +54,7 @@ WEB_CLIENT_PARAMS = {
     "app": "web",
     "client_type": "web",
     "version": "999.0.4",
-    "web_version": "2.5",
+    "web_version": "3.0",
     "x_client_type": "web",
     "x_app": "heybox_website",
     "x_os_type": "Windows",
@@ -140,6 +143,7 @@ class XiaoheiheApiClient:
         self.last_success_at: str | None = None
         self.last_error: dict[str, Any] | None = None
         self.last_notification_polls: dict[str, dict[str, Any]] = {}
+        self.last_direct_message_probe: dict[str, Any] = {}
         self.consecutive_status: dict[int, int] = {401: 0, 403: 0, 429: 0}
 
     @property
@@ -268,6 +272,76 @@ class XiaoheiheApiClient:
         )
         self.last_notification_polls[event_type.value] = summary
         return parsed
+
+    async def fetch_direct_messages(
+        self,
+        *,
+        cursor: str = "",
+        page: int = 1,
+        page_size: int = 20,
+        peer_uid: str = "",
+    ) -> DirectMessagePage:
+        """Read private messages using the known read-only route candidates.
+
+        The endpoint is intentionally isolated from notification polling. The
+        first route that returns a recognizable message collection wins; no
+        private-message write route is called here.
+        """
+        normalized_page_size = max(1, min(int(page_size), 50))
+        normalized_page = max(1, int(page))
+        offset = (normalized_page - 1) * normalized_page_size
+        if cursor:
+            try:
+                offset = max(0, int(cursor))
+            except (TypeError, ValueError):
+                offset = (normalized_page - 1) * normalized_page_size
+        base_params: dict[str, Any] = {
+            "offset": offset,
+            "limit": normalized_page_size,
+            "page": normalized_page,
+        }
+        if peer_uid:
+            base_params.update(
+                {
+                    "user_id": str(peer_uid),
+                    "uid": str(peer_uid),
+                    "peer_uid": str(peer_uid),
+                }
+            )
+        errors: list[dict[str, Any]] = []
+        for endpoint_name in (
+            EndpointName.DIRECT_MESSAGE_INBOX,
+            EndpointName.DIRECT_MESSAGE_HISTORY,
+        ):
+            try:
+                response = await self._request(endpoint_name, params=dict(base_params))
+                parsed = parse_direct_message_page(
+                    self.profile_id,
+                    response.payload,
+                    owner_uid=str(self.credentials.uid if self.credentials else ""),
+                    conversation_id=f"dm!{peer_uid}" if peer_uid else "",
+                    page_size=normalized_page_size,
+                    source=endpoint_name.value,
+                )
+                self.last_direct_message_probe = {
+                    "source": endpoint_name.value,
+                    "accepted_count": len(parsed.items),
+                    "next_cursor": parsed.next_cursor,
+                    "has_more": parsed.has_more,
+                }
+                return parsed
+            except ResponseShapeError as exc:
+                errors.append({"source": endpoint_name.value, "category": "response_shape", "error": str(exc)})
+                continue
+            except XiaoheiheApiError as exc:
+                errors.append({"source": endpoint_name.value, "category": exc.category, "error": str(exc)[:180]})
+                continue
+        self.last_direct_message_probe = {"source": "none", "errors": errors}
+        raise ResponseContractError(
+            "小黑盒私信读取接口尚未返回可识别的消息结构",
+            category="response_shape",
+            details={"probes": errors},
+        )
 
     async def fetch_thread_context(
         self,
@@ -556,11 +630,28 @@ class XiaoheiheApiClient:
             raise CredentialInvalidError(
                 "账号未登录", status_code=401, category="credential_invalid"
             )
-        request_params = dict(params or {})
-        for key, value in WEB_CLIENT_PARAMS.items():
-            request_params.setdefault(key, value)
-        if self.credentials and self.credentials.uid:
-            request_params.setdefault("heybox_id", self.credentials.uid)
+        is_comment_write = name is EndpointName.CREATE_COMMENT
+        if is_comment_write:
+            # The web comment endpoint uses its own v3 parameter contract and
+            # Cookie authentication. Do not inherit the generic heybox_id or
+            # device_id URL parameters used by read endpoints.
+            request_params = {
+                "app": "heybox",
+                "os_type": "web",
+                "x_app": "heybox_website",
+                "x_client_type": "web",
+                "x_os_type": "Windows",
+                "x_client_version": "",
+                "client_type": "web",
+                "web_version": "3.0",
+                "version": "999.0.4",
+            }
+        else:
+            request_params = dict(params or {})
+            for key, value in WEB_CLIENT_PARAMS.items():
+                request_params.setdefault(key, value)
+            if self.credentials and self.credentials.uid:
+                request_params.setdefault("heybox_id", self.credentials.uid)
         signed = self._signer.sign(
             contract.method,
             contract.path,
@@ -568,7 +659,12 @@ class XiaoheiheApiClient:
             json_body=json_body or form_body,
             signing_key=self.credentials.signing_key if self.credentials else "",
             device_id=self._device_id,
+            include_device_id=not is_comment_write,
         )
+        if is_comment_write:
+            signed.params["_rnd"] = generate_workshop_rnd(
+                int(signed.params["_time"]), signed.params["nonce"]
+            )
         headers = dict(signed.headers)
         headers["Referer"] = "https://www.xiaoheihe.cn/"
         if self.credentials and self.credentials.access_token:

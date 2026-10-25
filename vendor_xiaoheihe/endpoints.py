@@ -26,6 +26,8 @@ class EndpointName(StrEnum):
     FEED = "feed"
     TOPIC_INDEX = "topic_index"
     TOPIC_FEED = "topic_feed"
+    DIRECT_MESSAGE_INBOX = "direct_message_inbox"
+    DIRECT_MESSAGE_HISTORY = "direct_message_history"
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +55,7 @@ ENDPOINTS: dict[EndpointName, Endpoint] = {
         "/bbs/app/comment/create",
         True,
         False,
-        WORKSHOP_API_BASE_URL,
+        API_BASE_URL,
     ),
     EndpointName.CREATE_POST: Endpoint(
         "POST",
@@ -87,6 +89,14 @@ ENDPOINTS: dict[EndpointName, Endpoint] = {
     EndpointName.FEED: Endpoint("GET", "/bbs/app/feeds", True, True),
     EndpointName.TOPIC_INDEX: Endpoint("GET", "/bbs/app/api/topic/index/", True, True),
     EndpointName.TOPIC_FEED: Endpoint("GET", "/bbs/app/topic/feeds", True, True),
+    # These private-message routes are read-only probes until the live
+    # response contract is confirmed for the logged-in account.
+    EndpointName.DIRECT_MESSAGE_INBOX: Endpoint(
+        "GET", "/chatroom/v2/msg/user", True, True
+    ),
+    EndpointName.DIRECT_MESSAGE_HISTORY: Endpoint(
+        "GET", "/chat/stranger_messages/", True, True
+    ),
 }
 
 

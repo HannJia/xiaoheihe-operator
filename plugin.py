@@ -9,9 +9,16 @@ from typing import ClassVar, Iterable
 from maibot_sdk import API, Command, Field, MaiBotPlugin, PluginConfigBase, Tool
 
 try:
+    from maibot_sdk.types import ToolParameterInfo, ToolParamType
+except ImportError:  # pragma: no cover - local loading stub
+    ToolParameterInfo = None  # type: ignore[assignment,misc]
+    ToolParamType = None  # type: ignore[assignment,misc]
+
+try:
     from .drawpic_gateway import DrawingGateway
     from .content_generator import ContentGenerator
     from .context_provider import PersonaContextProvider
+    from .dm_store import DirectMessageStore
     from .models import IncomingEvent, OutgoingAction, OutgoingStatus
     from .policy import content_fingerprint, is_publishable, normalize_text
     from .qr_generator import qr_data_url
@@ -22,6 +29,7 @@ except ImportError:  # pragma: no cover - direct Runner fallback
     from drawpic_gateway import DrawingGateway
     from content_generator import ContentGenerator
     from context_provider import PersonaContextProvider
+    from dm_store import DirectMessageStore
     from models import IncomingEvent, OutgoingAction, OutgoingStatus
     from policy import content_fingerprint, is_publishable, normalize_text
     from qr_generator import qr_data_url
@@ -31,33 +39,40 @@ except ImportError:  # pragma: no cover - direct Runner fallback
 
 
 class XiaoheihePluginSection(PluginConfigBase):
-    config_version: str = Field(default="0.1.0", description="配置版本")
-    enabled: bool = Field(default=False, description="是否启用小黑盒运营插件")
-    profile_id: str = Field(default="default", description="小黑盒账号档案 ID")
-    mode: str = Field(default="dry_run", description="运营模式：auto 或 dry_run；新安装默认只演练不发送")
-    poll_interval_seconds: int = Field(default=60, description="通知轮询间隔，最低 30 秒")
-    feed_interval_seconds: int = Field(default=900, description="主动浏览间隔")
-    posts_per_day: int = Field(default=1, description="每日主动发帖上限")
-    proactive_comments_per_day: int = Field(default=4, description="每日主动评论上限")
-    notification_replies_per_day: int = Field(default=10, description="每日通知回复上限")
-    send_cooldown_seconds: int = Field(default=120, description="账号级发送冷却")
-    community_allowlist: list[str] = Field(default_factory=list, description="允许主动浏览的社区 ID")
-    generate_post_images: bool = Field(default=True, description="主动帖子是否默认生成配图")
+    config_version: str = Field(default="0.1.0", description="配置格式版本，由插件维护，不需要手动修改")
+    enabled: bool = Field(default=False, description="总开关：关闭时只保留登录和只读检查，不执行自动发帖、评论或回复")
+    profile_id: str = Field(default="default", description="小黑盒账号档案 ID；只有多账号时才需要改名")
+    mode: str = Field(default="dry_run", description="运行模式：dry_run 只生成并记录计划，auto 才会向小黑盒发送内容")
+    poll_interval_seconds: int = Field(default=60, description="通知检查间隔，单位秒，最低 30；用于提及、评论和楼中楼回复")
+    feed_interval_seconds: int = Field(default=3600, description="推荐流浏览间隔，单位秒；建议 3600，避免频繁请求和增加模型消耗")
+    posts_per_day: int = Field(default=0, description="每天主动发帖数量；设为 0 表示关闭自动发帖")
+    proactive_comments_per_day: int = Field(default=1, description="每天对推荐流主动评论数量；设为 0 表示关闭主动评论")
+    notification_replies_per_day: int = Field(default=1, description="每天回复提及、评论和楼中楼的数量；设为 0 表示关闭自动回复")
+    send_cooldown_seconds: int = Field(default=120, description="两次发送之间的最短间隔，单位秒，用于降低重复发送和账号风控风险")
+    dm_enabled: bool = Field(default=False, description="私信功能暂不纳入当前发布范围；保持关闭可避免轮询私信")
+    dm_mode: str = Field(default="dry_run", description="兼容保留字段：当前发布版不提供私信发送，auto 会安全闭锁")
+    dm_poll_interval_seconds: int = Field(default=180, description="私信检查间隔，单位秒；只在发现新消息时调用模型")
+    dm_daily_quota: int = Field(default=1, description="每天自动回复私信数量；设为 0 表示关闭私信回复")
+    dm_cooldown_seconds: int = Field(default=600, description="同一账号两次私信回复的最短间隔，单位秒")
+    dm_max_reply_chars: int = Field(default=180, description="私信自动回复最大字数")
+    dm_user_allowlist: list[str] = Field(default_factory=list, description="允许自动回复的对方 UID；留空表示只读，不自动生成私信回复")
+    community_allowlist: list[str] = Field(default_factory=list, description="允许浏览和主动互动的社区 ID；留空表示不主动互动")
+    generate_post_images: bool = Field(default=True, description="自动发帖时是否调用生图插件并附带图片")
     life_context_api: str = Field(
         default="org.orge-8.life-frequency.get_current_context",
-        description="生活轨迹插件公开 API 名称",
+        description="提供当前生活轨迹的 MaiBot API 名称，只读调用",
     )
     identity_reference_api: str = Field(
         default="org.mai-mai.self-identity.get_default_reference_image",
-        description="身份插件公开参考图 API 名称",
+        description="提供生图参考图的 MaiBot API 名称，只读调用",
     )
-    post_topic_ids: str = Field(default="", description="主动发帖使用的社区/话题 ID")
+    post_topic_ids: str = Field(default="", description="主动发帖使用的社区或话题 ID，多个 ID 用英文逗号分隔；留空表示不自动发帖")
     game_topic_hints: list[str] = Field(
         default_factory=lambda: [
             "游戏", "steam", "switch", "ps5", "pc", "副本", "角色", "抽卡",
             "绝区零", "原神", "崩坏", "星穹铁道", "apex", "瓦罗兰特", "单机",
         ],
-        description="主动互动的游戏话题关键词",
+        description="推荐流筛选关键词；只处理游戏相关帖子，多个关键词按列表填写",
     )
 
 
@@ -103,6 +118,34 @@ class XiaoheiheConfig(PluginConfigBase):
         return self.plugin.send_cooldown_seconds
 
     @property
+    def dm_enabled(self) -> bool:
+        return self.plugin.dm_enabled
+
+    @property
+    def dm_mode(self) -> str:
+        return self.plugin.dm_mode
+
+    @property
+    def dm_poll_interval_seconds(self) -> int:
+        return self.plugin.dm_poll_interval_seconds
+
+    @property
+    def dm_daily_quota(self) -> int:
+        return self.plugin.dm_daily_quota
+
+    @property
+    def dm_cooldown_seconds(self) -> int:
+        return self.plugin.dm_cooldown_seconds
+
+    @property
+    def dm_max_reply_chars(self) -> int:
+        return self.plugin.dm_max_reply_chars
+
+    @property
+    def dm_user_allowlist(self) -> list[str]:
+        return self.plugin.dm_user_allowlist
+
+    @property
     def community_allowlist(self) -> list[str]:
         return self.plugin.community_allowlist
 
@@ -134,6 +177,7 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
     def __init__(self) -> None:
         super().__init__()
         self._store: OperatorStore | None = None
+        self._dm_store: DirectMessageStore | None = None
         self._drawing: DrawingGateway | None = None
         self._runtime: XiaoheiheRuntime | None = None
         self._generator: ContentGenerator | None = None
@@ -141,10 +185,12 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         self._worker: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
         self._last_feed_at = 0.0
+        self._last_dm_poll_at = 0.0
 
     async def on_load(self) -> None:
         data_dir = Path(self.ctx.paths.data_dir)
         self._store = OperatorStore(data_dir / "state.db")
+        self._dm_store = DirectMessageStore(data_dir / "state.db")
         self._drawing = DrawingGateway(self.ctx.api)
         self._runtime = XiaoheiheRuntime(data_dir, self.config.profile_id)
         self._generator = ContentGenerator(self.ctx.llm)
@@ -167,6 +213,8 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
                 pass
         if self._store is not None:
             self._store.close()
+        if self._dm_store is not None:
+            self._dm_store.close()
         if self._runtime is not None:
             await self._runtime.close()
 
@@ -205,6 +253,9 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         for event_type in (NotificationType.MENTION, NotificationType.REPLY):
             await self._poll_notifications(client, event_type)
         now = time.time()
+        if self.config.dm_enabled and now - self._last_dm_poll_at >= max(60, int(self.config.dm_poll_interval_seconds)):
+            self._last_dm_poll_at = now
+            await self._poll_direct_messages(client)
         if now - self._last_feed_at >= max(300, int(self.config.feed_interval_seconds)):
             self._last_feed_at = now
             await self._proactive_once(client)
@@ -255,36 +306,274 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
                 route=route,
                 content=str(row.get("content") or ""),
             )
+            if kind == "notification_reply":
+                self._finish_incoming_after_dispatch(
+                    str(metadata.get("event_key") or ""),
+                    str(row.get("action_key") or ""),
+                )
             return
+
+    async def _poll_direct_messages(self, client) -> None:
+        if self._dm_store is None or self._store is None or self._runtime is None:
+            return
+        try:
+            _, baseline_ready = self._dm_store.get_cursor(self.config.profile_id)
+            # Message lists are newest-first and shift when a new message
+            # arrives. Reusing an old offset can skip the message we need.
+            page = await client.fetch_direct_messages(
+                cursor="",
+                page=1,
+                page_size=30,
+            )
+        except Exception as exc:  # noqa: BLE001
+            probe = getattr(client, "last_direct_message_probe", {})
+            self._dm_store.set_probe(
+                self.config.profile_id,
+                {"status": "error", **(_safe_status_data(probe) or {})},
+            )
+            self.ctx.logger.warning(
+                "小黑盒私信只读探测失败：type=%s probe=%s",
+                type(exc).__name__,
+                _safe_status_data(probe),
+            )
+            return
+
+        messages = list(getattr(page, "items", []) or [])
+        probe = getattr(client, "last_direct_message_probe", {})
+        self._dm_store.set_probe(
+            self.config.profile_id,
+            {
+                "status": "ok",
+                "source": str(getattr(page, "source", "") or ""),
+                "accepted_count": len(messages),
+                "has_more": bool(getattr(page, "has_more", False)),
+                **(_safe_status_data(probe) or {}),
+            },
+        )
+        if not baseline_ready:
+            inserted = 0
+            for message in messages:
+                if self._dm_store.insert_message(message, baseline=True):
+                    inserted += 1
+            self._dm_store.set_cursor(
+                self.config.profile_id,
+                str(getattr(page, "next_cursor", "") or ""),
+                baseline_ready=True,
+            )
+            self.ctx.logger.info(
+                "小黑盒私信历史基线已建立：messages=%s inserted=%s source=%s",
+                len(messages),
+                inserted,
+                str(getattr(page, "source", "")),
+            )
+            return
+
+        inserted = 0
+        for message in messages:
+            if not self._dm_store.insert_message(message):
+                continue
+            inserted += 1
+            if not bool(getattr(message, "incoming", False)):
+                continue
+            self.ctx.logger.info(
+                "发现新的小黑盒私信：message_id=%s sender_uid=%s chars=%s",
+                str(getattr(message, "message_id", ""))[:80],
+                str(getattr(message, "sender_uid", ""))[:80],
+                len(str(getattr(message, "text", "") or "")),
+            )
+            await self._process_direct_message(message)
+        self._dm_store.set_cursor(
+            self.config.profile_id,
+            str(getattr(page, "next_cursor", "") or ""),
+            baseline_ready=True,
+        )
+        if inserted:
+            self.ctx.logger.info(
+                "小黑盒私信轮询完成：new_messages=%s source=%s",
+                inserted,
+                str(getattr(page, "source", "")),
+            )
+
+    async def _process_direct_message(self, message) -> None:
+        if self._store is None or self._dm_store is None or self._generator is None:
+            return
+        sender_uid = str(getattr(message, "sender_uid", "") or "").strip()
+        allowlist = {
+            str(value).strip()
+            for value in self.config.dm_user_allowlist
+            if str(value).strip()
+        }
+        if not allowlist or sender_uid not in allowlist:
+            self.ctx.logger.info(
+                "私信只读记录，未生成自动回复：sender_uid=%s allowlist_configured=%s",
+                sender_uid[:80],
+                bool(allowlist),
+            )
+            return
+        if not self._within_quota("dm_reply", int(self.config.dm_daily_quota)):
+            return
+
+        message_id = str(getattr(message, "message_id", "") or "")
+        if not message_id:
+            return
+        action_key = f"dm_reply:{message_id}"
+        if self._store.get_outgoing(action_key):
+            return
+        previous = self._store.last_outgoing_at(
+            kind="dm_reply",
+            target_id=sender_uid,
+            exclude_action_key=action_key,
+        )
+        if previous is not None and time.time() - previous < max(0, int(self.config.dm_cooldown_seconds)):
+            self.ctx.logger.info(
+                "小黑盒私信回复处于同一账号冷却期：sender_uid=%s",
+                sender_uid[:80],
+            )
+            return
+        recent = self._dm_store.list_recent(self.config.profile_id, limit=12)
+        recent_lines = [
+            f"{item.get('sender_name') or item.get('sender_uid') or '对方'}：{normalize_text(str(item.get('text') or ''), 240)}"
+            for item in reversed(recent)
+            if str(item.get("peer_uid") or "") == sender_uid and str(item.get("text") or "").strip()
+        ]
+        reply = await self._generator.direct_message_reply(
+            sender_name=str(getattr(message, "sender_name", "") or ""),
+            message=str(getattr(message, "text", "") or ""),
+            recent_context="\n".join(recent_lines[-8:]),
+            max_chars=int(self.config.dm_max_reply_chars),
+        )
+        if not reply:
+            return
+        allowed, reason = is_publishable(reply)
+        if not allowed:
+            self.ctx.logger.info("小黑盒私信回复被内容边界拦截：%s", reason)
+            return
+        action = OutgoingAction(
+            action_key,
+            "dm_reply",
+            sender_uid,
+            reply,
+            metadata={
+                "message_id": message_id,
+                "conversation_id": str(getattr(message, "conversation_id", "") or ""),
+                "peer_uid": sender_uid,
+                "sender_name": str(getattr(message, "sender_name", "") or ""),
+                "reply_mode": str(self.config.dm_mode),
+            },
+        )
+        if not self._store.begin_outgoing(action):
+            return
+        if str(self.config.dm_mode).lower() == "dry_run" or str(self.config.mode).lower() == "dry_run":
+            self._store.update_outgoing(action_key, OutgoingStatus.DRY_RUN)
+            return
+        # The read contract is being verified first. A write route is not
+        # implemented yet, so auto mode fails closed instead of guessing.
+        self._store.update_outgoing(
+            action_key,
+            OutgoingStatus.FAILED,
+            error="dm_send_contract_unavailable",
+        )
+        self.ctx.logger.warning(
+            "小黑盒私信已生成回复但未发送：公开网页只提供读取接口，发送契约未确认 message_id=%s",
+            message_id[:80],
+        )
 
     async def _poll_notifications(self, client, event_type: NotificationType) -> None:
         assert self._store is not None
-        cursor, baseline_ready = self._store.get_cursor(self.config.profile_id, event_type.value)
-        page = await client.fetch_notifications(event_type, cursor=cursor, page_size=20)
+        # The API client treats cursor as an offset. Reusing an advancing
+        # offset can skip fresh notifications when new items shift the list.
+        _, baseline_ready = self._store.get_cursor(self.config.profile_id, event_type.value)
+        page = await client.fetch_notifications(event_type, cursor="", page=1, page_size=20)
         items = list(getattr(page, "items", []) or [])
-        next_cursor = str(getattr(page, "next_cursor", "") or cursor)
         if not baseline_ready:
-            self._store.set_cursor(self.config.profile_id, event_type.value, next_cursor, baseline_ready=True)
+            for item in items:
+                event = self._normalize_event(item, event_type)
+                if event is None:
+                    continue
+                self._store.remember_incoming_baseline(
+                    event.event_key,
+                    event_type.value,
+                    {
+                        "event_key": event.event_key,
+                        "kind": event.kind,
+                        "post_id": event.post_id,
+                        "comment_id": event.comment_id,
+                        "root_comment_id": event.root_comment_id,
+                        "sender_id": event.sender_id,
+                        "sender_name": event.sender_name,
+                        "text": event.text,
+                    },
+                )
+            self._store.set_cursor(self.config.profile_id, event_type.value, "", baseline_ready=True)
             self.ctx.logger.info("小黑盒 %s 通知历史基线已建立", event_type.value)
             return
-        for item in items:
-            event = self._normalize_event(item, event_type)
-            if event is None:
+        # Newest-first scans stop at the first known event. If an entire page is
+        # new, continue to older pages (bounded to 200 notifications per type).
+        for page_number in range(1, 11):
+            if page_number > 1:
+                if not bool(getattr(page, "has_more", False)):
+                    break
+                page = await client.fetch_notifications(
+                    event_type, cursor="", page=page_number, page_size=20
+                )
+                items = list(getattr(page, "items", []) or [])
+            found_known_event = False
+            for item in items:
+                event = self._normalize_event(item, event_type)
+                if event is None:
+                    continue
+                if self._store.has_incoming(event.event_key):
+                    found_known_event = True
+                    continue
+                self._store.claim_incoming(
+                    event.event_key,
+                    event_type.value,
+                    {
+                        "event_key": event.event_key,
+                        "kind": event.kind,
+                        "post_id": event.post_id,
+                        "comment_id": event.comment_id,
+                        "root_comment_id": event.root_comment_id,
+                        "sender_id": event.sender_id,
+                        "sender_name": event.sender_name,
+                        "text": event.text,
+                    },
+                )
+            if found_known_event or not bool(getattr(page, "has_more", False)):
+                break
+        self._store.set_cursor(self.config.profile_id, event_type.value, "", baseline_ready=True)
+        # Claims are durable before work starts. Revisit pending events even if
+        # their notification is no longer present in the current API page.
+        for row in self._store.list_pending_incoming(kind=event_type.value, limit=50):
+            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            event = IncomingEvent(
+                event_key=str(payload.get("event_key") or row.get("event_key") or ""),
+                kind=str(payload.get("kind") or event_type.value),
+                post_id=str(payload.get("post_id") or ""),
+                comment_id=str(payload.get("comment_id") or ""),
+                root_comment_id=str(payload.get("root_comment_id") or ""),
+                sender_id=str(payload.get("sender_id") or ""),
+                sender_name=str(payload.get("sender_name") or ""),
+                text=str(payload.get("text") or ""),
+            )
+            if not event.event_key or not event.post_id or not event.text.strip():
+                self._store.mark_incoming_done(event.event_key, state="ignored")
                 continue
-            audit_payload = {
-                "event_key": event.event_key,
-                "kind": event.kind,
-                "post_id": event.post_id,
-                "comment_id": event.comment_id,
-                "root_comment_id": event.root_comment_id,
-                "sender_id": event.sender_id,
-                "sender_name": event.sender_name,
-                "text": event.text,
-            }
-            if not self._store.claim_incoming(event.event_key, event_type.value, audit_payload):
-                continue
-            await self._process_event(client, event)
-        self._store.set_cursor(self.config.profile_id, event_type.value, next_cursor, baseline_ready=True)
+            try:
+                await self._process_event(client, event)
+            except Exception as exc:  # noqa: BLE001
+                attempts = int(row.get("attempts") or 0)
+                retry_delay = min(3600, 60 * (2 ** min(attempts, 6)))
+                self._store.defer_incoming(
+                    event.event_key,
+                    f"processing_error:{type(exc).__name__}",
+                    delay_seconds=retry_delay,
+                )
+                self.ctx.logger.warning(
+                    "小黑盒通知回复暂缓重试：event=%s error_type=%s",
+                    event.event_key,
+                    type(exc).__name__,
+                )
 
     @staticmethod
     def _normalize_event(item: object, event_type: NotificationType) -> IncomingEvent | None:
@@ -323,14 +612,41 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         )
 
     async def _process_event(self, client, event: IncomingEvent) -> None:
-        if self._store is None or self._generator is None:
+        if self._store is None:
+            return
+        action_key = f"reply:{event.event_key}"
+        existing = self._store.get_outgoing(action_key)
+        if existing:
+            if existing.get("status") == OutgoingStatus.SUPPRESSED.value and str(existing.get("error") or "") == "cooldown":
+                self._store.defer_incoming(
+                    event.event_key,
+                    "send_cooldown",
+                    delay_seconds=max(30, int(self.config.poll_interval_seconds)),
+                    increment_attempt=False,
+                )
+                return
+            # Any attempted notification reply is terminal. Never repeat a
+            # rejected write or an uncertain send for the same event.
+            self._store.mark_incoming_done(event.event_key)
+            return
+        if self._generator is None:
+            self._defer_notification(event.event_key, "reply_generator_unavailable", delay_seconds=300)
             return
         if not self._within_quota("notification_reply", int(self.config.notification_replies_per_day)):
-            self.ctx.logger.info("小黑盒通知回复达到每日配额，已跳过：%s", event.event_key)
+            now = time.time()
+            next_day = self._day_start() + 24 * 60 * 60
+            self._store.defer_incoming(
+                event.event_key,
+                "daily_quota",
+                delay_seconds=max(60, next_day - now),
+                increment_attempt=False,
+            )
+            self.ctx.logger.info("小黑盒通知回复达到每日配额，已保留待处理：%s", event.event_key)
             return
+
         context = await client.fetch_thread_context(event.post_id, root_comment_id=event.root_comment_id)
         if context is None:
-            self.ctx.logger.warning("小黑盒通知缺少帖子上下文，已跳过：post_id=%s", event.post_id)
+            self._defer_notification(event.event_key, "thread_context_missing", delay_seconds=300)
             return
         reply = await self._generator.reply(
             post_title=str(getattr(context, "title", "")),
@@ -338,12 +654,13 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
             comment=event.text,
         )
         if not reply:
+            self._defer_notification(event.event_key, "empty_generated_reply", delay_seconds=300)
             return
         allowed, reason = is_publishable(reply)
         if not allowed:
             self.ctx.logger.info("小黑盒回复被内容边界拦截：%s", reason)
+            self._store.mark_incoming_done(event.event_key, state="ignored")
             return
-        action_key = f"reply:{event.event_key}"
         action = OutgoingAction(
             action_key,
             "notification_reply",
@@ -354,10 +671,20 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
                 "root_comment_id": event.root_comment_id,
                 "parent_comment_id": event.comment_id,
                 "event_key": event.event_key,
+                "reply_strategy": "post_context_and_comment",
+                "post_title": normalize_text(str(getattr(context, "title", "")), 120),
+                "post_body_fingerprint": content_fingerprint(
+                    normalize_text(str(getattr(context, "body", "")), 900)
+                ),
+                "comment_fingerprint": content_fingerprint(normalize_text(event.text, 500)),
             },
         )
         if not self._store.begin_outgoing(action):
+            # The same event already has an audited action. Its state is either
+            # handled by a dedicated retry path or intentionally terminal.
+            self._store.mark_incoming_done(event.event_key)
             return
+        self._store.mark_incoming_done(event.event_key, state="dispatched")
         route = RoutingTarget(
             profile_id=self.config.profile_id,
             post_id=event.post_id,
@@ -371,6 +698,35 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
             route=route,
             content=reply,
         )
+        self._finish_incoming_after_dispatch(event.event_key, action_key)
+
+    def _defer_notification(self, event_key: str, reason: str, *, delay_seconds: float) -> None:
+        if self._store is None:
+            return
+        row = self._store.get_incoming(event_key)
+        attempts = int(row.get("attempts") or 0) if row else 0
+        delay = min(3600, max(delay_seconds, 60 * (2 ** min(attempts, 6))))
+        self._store.defer_incoming(
+            event_key,
+            reason,
+            delay_seconds=delay,
+        )
+        self.ctx.logger.info(
+            "小黑盒通知已延后重试：event=%s reason=%s delay_seconds=%s attempt=%s",
+            event_key,
+            reason,
+            int(delay),
+            attempts + 1,
+        )
+
+    def _finish_incoming_after_dispatch(self, event_key: str, action_key: str) -> None:
+        if self._store is None:
+            return
+        outgoing = self._store.get_outgoing(action_key) or {}
+        status = str(outgoing.get("status") or "")
+        if status == OutgoingStatus.SUPPRESSED.value and str(outgoing.get("error") or "") == "cooldown":
+            return
+        self._store.mark_incoming_done(event_key)
 
     def _day_start(self) -> float:
         local = time.localtime()
@@ -383,10 +739,10 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
             return False
         return self._store.count_since(kind, self._day_start()) < limit
 
-    def _cooldown_ready(self) -> bool:
+    def _cooldown_ready(self, *, exclude_action_key: str = "") -> bool:
         if self._store is None:
             return False
-        previous = self._store.last_outgoing_at()
+        previous = self._store.last_outgoing_at(exclude_action_key=exclude_action_key)
         if previous is None:
             return True
         return time.time() - previous >= max(0, int(self.config.send_cooldown_seconds))
@@ -396,15 +752,31 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         if str(self.config.mode).lower() == "dry_run":
             self._store.update_outgoing(action_key, OutgoingStatus.DRY_RUN)
             return
-        if not self._cooldown_ready():
+        if not self._cooldown_ready(exclude_action_key=action_key):
             self._store.update_outgoing(action_key, OutgoingStatus.SUPPRESSED, error="cooldown")
             return
+        # Persist the send boundary before touching the external API. If the
+        # process dies after this point, reconciliation may read back the
+        # thread, but it must never blindly issue the same write again.
+        self._store.update_outgoing(action_key, OutgoingStatus.SENDING, error="send_started")
         try:
             result = await client.send_comment(route, content)
             if not result.confirmed:
                 self._store.update_outgoing(action_key, OutgoingStatus.SEND_UNKNOWN)
                 return
-            verified = await self._verify_comment(client, route, content)
+            verify_route = route
+            if not route.root_comment_id and result.external_comment_id:
+                # The post-tree endpoint exposes a root-specific comment under
+                # current_comment. Use the returned main-comment ID for
+                # readback instead of querying the post's empty top-level list.
+                verify_route = RoutingTarget(
+                    profile_id=str(getattr(route, "profile_id", self.config.profile_id)),
+                    post_id=route.post_id,
+                    root_comment_id=str(result.external_comment_id),
+                    parent_comment_id=str(result.external_comment_id),
+                    notification_id=str(getattr(route, "notification_id", "")),
+                )
+            verified = await self._verify_comment(client, verify_route, content)
             status = OutgoingStatus.VERIFIED if verified else OutgoingStatus.SEND_UNKNOWN
             self._store.update_outgoing(
                 action_key,
@@ -414,24 +786,49 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
             )
         except Exception as exc:  # noqa: BLE001
             category = str(getattr(exc, "category", ""))
-            status = OutgoingStatus.FAILED if category in {"credential_invalid", "forbidden", "rate_limited"} else OutgoingStatus.SEND_UNKNOWN
-            self._store.update_outgoing(action_key, status, error=type(exc).__name__)
-            self.ctx.logger.error("小黑盒评论发送失败或结果未知：%s", type(exc).__name__)
+            status = OutgoingStatus.FAILED if category in {
+                "credential_invalid",
+                "forbidden",
+                "rate_limited",
+                "upstream_rejected",
+                "response_shape",
+                "http",
+            } else OutgoingStatus.SEND_UNKNOWN
+            detail = getattr(exc, "details", {})
+            detail_keys = sorted(str(key) for key in detail) if isinstance(detail, dict) else []
+            self._store.update_outgoing(
+                action_key,
+                status,
+                error=_error_label(exc),
+            )
+            self.ctx.logger.error(
+                "小黑盒评论发送失败或结果未知：type=%s category=%s status=%s message=%s detail_keys=%s",
+                type(exc).__name__,
+                category,
+                getattr(exc, "status_code", ""),
+                str(exc)[:240],
+                detail_keys,
+            )
 
     async def _verify_comment(self, client, route: RoutingTarget, content: str) -> bool:
         try:
-            comments = await client.recent_comments(route, limit=30)
+            # The dedicated /bbs/app/comment/user route is unstable for this
+            # account. The thread tree is already required for content-aware
+            # replies and contains the same comment data, so use it as the
+            # readback source to avoid false send_unknown states and retries.
+            context = await client.fetch_thread_context(
+                route.post_id,
+                root_comment_id=route.root_comment_id,
+            )
+            comments = list(getattr(context, "comments", []) or [])
         except Exception as exc:  # noqa: BLE001
-            self.ctx.logger.warning("小黑盒评论读回核验失败：%s", type(exc).__name__)
+            self.ctx.logger.warning("小黑盒评论读回核验失败：%s", _error_label(exc))
             return False
         expected = normalize_text(content, 240)
         for item in comments:
             if not isinstance(item, dict):
                 continue
-            candidate = normalize_text(
-                str(item.get("text") or item.get("content") or item.get("comment_a_text") or ""),
-                240,
-            )
+            candidate = normalize_text(_comment_text(item), 240)
             if candidate and candidate == expected:
                 return True
         return False
@@ -439,7 +836,10 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
     async def _reconcile_unknowns(self, client) -> None:
         if self._store is None:
             return
-        for row in self._store.list_outgoing(status=OutgoingStatus.SEND_UNKNOWN, limit=30):
+        rows: list[dict[str, object]] = []
+        for status in (OutgoingStatus.SENDING, OutgoingStatus.SEND_UNKNOWN):
+            rows.extend(self._store.list_outgoing(status=status, limit=30))
+        for row in rows:
             metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
             try:
                 if row.get("kind") in {"notification_reply", "proactive_comment"}:
@@ -616,7 +1016,7 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
                 if self._drawing is None:
                     raise RuntimeError("绘图网关未初始化")
                 reference = await self._persona.identity_reference()
-                prompt = f"萧鱼儿的小黑盒生活分享配图：{title}。{body}。保持身份参考图中的人物形象一致。"
+                prompt = f"maibot 的小黑盒生活分享配图：{title}。{body}。保持身份参考图中的人物形象一致。"
                 task = await self._drawing.submit(
                     prompt,
                     request_id=action.request_id,
@@ -649,7 +1049,7 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
                 title=title,
                 content_blocks=blocks,
                 topic_ids=topic_id_value,
-                hashtags=["游戏日常", "萧鱼儿"],
+                hashtags=["游戏日常", "maibot"],
             )
             link_id = str(result.get("link_id") or "")
             if not link_id:
@@ -699,11 +1099,37 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
 
     @Tool("xiaoheihe_status", brief_description="查看小黑盒运营插件状态")
     async def handle_status(self, **kwargs):
+        dm_summary = (
+            self._dm_store.summary(self.config.profile_id)
+            if self._dm_store is not None
+            else {"available": False}
+        )
         return {
             "success": True,
             "enabled": bool(self.config.enabled),
             "mode": str(self.config.mode),
             "profile_id": str(self.config.profile_id),
+            "reply_capabilities": {
+                "post_comments": "已启用：读取原帖标题、正文和收到的评论后生成回复",
+                "mentions_and_replies": "已启用：处理小黑盒通知中心的提及、评论和楼中楼",
+                "direct_messages": "当前版本未纳入发布范围：默认关闭，不发送私信",
+            },
+            "direct_message": {
+                "enabled": bool(self.config.dm_enabled),
+                "mode": str(self.config.dm_mode),
+                "poll_interval_seconds": int(self.config.dm_poll_interval_seconds),
+                "daily_quota": int(self.config.dm_daily_quota),
+                "allowlist_size": len(list(self.config.dm_user_allowlist or [])),
+                "state": dm_summary,
+            },
+            "settings_help": {
+                "mode": "dry_run 只记录计划；auto 才会真实发送",
+                "feed_interval_seconds": "推荐 3600 秒，即每 60 分钟浏览一次",
+                "posts_per_day": "建议测试阶段保持 0",
+                "notification_replies_per_day": "建议从 1 开始，确认链路后再增加",
+                "dm_user_allowlist": "私信功能暂不启用；保留字段仅用于兼容旧配置",
+                "dm_mode": "当前发布版不提供私信发送，保持 dry_run",
+            },
             "message": "小黑盒运营插件已加载" if not self.config.enabled else "小黑盒运营插件运行中",
         }
 
@@ -725,7 +1151,22 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": type(exc).__name__}
 
-    @Tool("xiaoheihe_check_content", brief_description="检查一段内容是否符合萧鱼儿的小黑盒发布边界")
+    @Tool(
+        "xiaoheihe_check_content",
+        brief_description="检查一段内容是否符合 maibot 的小黑盒发布边界",
+        parameters=(
+            [
+                ToolParameterInfo(
+                    name="content",
+                    param_type=ToolParamType.STRING,
+                    description="需要检查的拟发布文本",
+                    required=True,
+                )
+            ]
+            if ToolParameterInfo is not None and ToolParamType is not None
+            else None
+        ),
+    )
     async def handle_check_content(self, content: str, **kwargs):
         allowed, reason = is_publishable(content)
         return {"success": True, "allowed": allowed, "reason": reason}
@@ -791,12 +1232,12 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
             raise RuntimeError(str(result.get("error") or result.get("message") or "二维码生成失败"))
         return self._webui_login_payload({"state": "waiting_scan", "message": "请使用小黑盒 App 扫码"})
 
-    @Command("xhh_status", pattern=r"^/xhh_status$")
+    @Command("xhh_status", pattern=r"^/xhh_status$", permission="operator")
     async def handle_command(self, **kwargs):
         result = await self.handle_status(**kwargs)
         return True, result["message"], 2
 
-    @Command("xhh_login", pattern=r"^/xhh_login$")
+    @Command("xhh_login", pattern=r"^/xhh_login$", permission="operator")
     async def handle_login_command(self, **kwargs):
         result = await self.handle_request_login(**kwargs)
         if not result.get("success"):
@@ -807,7 +1248,7 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
             2,
         )
 
-    @Command("xhh_login_check", pattern=r"^/xhh_login_check$")
+    @Command("xhh_login_check", pattern=r"^/xhh_login_check$", permission="operator")
     async def handle_login_check_command(self, **kwargs):
         result = await self.handle_check_login(**kwargs)
         return True, f"小黑盒登录状态：{result.get('state', 'unknown')} {result.get('message', '')}", 2
@@ -849,6 +1290,48 @@ def _same_post_content(
         content_fingerprint(observed_title) == content_fingerprint(normalize_text(title, 100))
         and content_fingerprint(observed_body) == content_fingerprint(normalize_text(body, 320))
     )
+
+
+def _error_label(exc: BaseException) -> str:
+    """Persist a useful, bounded error label without storing raw payloads."""
+
+    category = str(getattr(exc, "category", "") or "").strip()
+    status_code = str(getattr(exc, "status_code", "") or "").strip()
+    message = normalize_text(str(exc), 160).strip()
+    if not message or message.casefold() == type(exc).__name__.casefold():
+        message = ""
+    parts = [category or type(exc).__name__]
+    if status_code and status_code != "0":
+        parts.append(f"http_{status_code}")
+    if message:
+        parts.append(message)
+    return ":".join(parts)[:500]
+
+
+def _safe_status_data(value: object) -> str:
+    """Keep probe diagnostics short and free of raw response payloads."""
+    if not isinstance(value, dict):
+        return normalize_text(str(value or ""), 300)
+    allowed = {}
+    for key in ("source", "accepted_count", "next_cursor", "has_more", "errors"):
+        if key in value:
+            allowed[key] = value[key]
+    return normalize_text(str(allowed), 500)
+
+
+def _comment_text(value: object) -> str:
+    """Extract comment text from a thread-tree item without assuming one schema."""
+
+    if not isinstance(value, dict):
+        return str(value or "")
+    for key in ("text", "content", "comment_a_text", "comment_text", "message"):
+        candidate = value.get(key)
+        if candidate not in (None, ""):
+            return str(candidate)
+    nested = value.get("comment")
+    if isinstance(nested, dict):
+        return _comment_text(nested)
+    return ""
 
 
 def create_plugin():

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import secrets
 import time
 from dataclasses import dataclass
@@ -12,6 +13,8 @@ from .models import Credentials
 # The hkey algorithm is independently ported to Python from the MIT-licensed
 # heybox-core implementation by XiaHouSheng. See THIRD_PARTY_NOTICES.md.
 _HKEY_ALPHABET = "AB45STUVWZEFGJ6CH01D237IXYPQRKLMN89"  # gitleaks:allow
+_WORKSHOP_RND_VERSION = "15"
+_WORKSHOP_RND_KEY = "Z7mFG4tQp9Ws2LxB8H"  # Public web-client compatibility value.
 # MD5 is required by the upstream compatibility contract. It is not used for
 # password storage, integrity protection, or any local security decision.
 
@@ -34,6 +37,7 @@ class RequestSigner:
         json_body: dict[str, Any] | None,
         signing_key: str,
         device_id: str,
+        include_device_id: bool = True,
         now: int | None = None,
         nonce: str | None = None,
     ) -> SignedRequest:
@@ -55,11 +59,11 @@ class RequestSigner:
         normalized.setdefault("_time", str(timestamp))
         normalized.setdefault("nonce", request_nonce)
         normalized.setdefault("hkey", generate_hkey(path, timestamp, request_nonce))
-        if device_id:
+        if device_id and include_device_id:
             normalized.setdefault("device_id", device_id)
         # These arguments remain in the boundary for future, independently
         # verified Workshop signing. They are not part of the GET hkey.
-        del method, json_body, signing_key
+        del method, json_body, signing_key, include_device_id
         return SignedRequest(params=normalized, headers={})
 
 
@@ -109,7 +113,7 @@ def ensure_client_identity(
 def generate_hkey(path: str, timestamp: int, nonce: str) -> str:
     normalized_path = f"/{'/'.join(part for part in str(path).split('/') if part)}/"
     parts = (
-        _map_to_alphabet(str(timestamp), _HKEY_ALPHABET[:-2]),
+        _map_to_alphabet(str(timestamp + 1), _HKEY_ALPHABET[:-2]),
         _map_to_alphabet(normalized_path, _HKEY_ALPHABET),
         _map_to_alphabet(str(nonce), _HKEY_ALPHABET),
     )
@@ -131,31 +135,41 @@ def _map_to_alphabet(value: str, alphabet: str) -> str:
 
 
 def _xtime(value: int) -> int:
-    return (255 & ((value << 1) ^ 27)) if value & 128 else value << 1
+    return (((value << 1) ^ 27) & 255) if value & 128 else value << 1
 
 
-def _mul3(value: int) -> int:
+def _q(value: int) -> int:
     return _xtime(value) ^ value
 
 
-def _mul4(value: int) -> int:
-    return _mul3(_xtime(value))
+def _r(value: int) -> int:
+    return _q(_xtime(value))
 
 
-def _mul8(value: int) -> int:
-    return _mul4(_mul3(_xtime(value)))
+def _y(value: int) -> int:
+    return _r(_q(_xtime(value)))
 
 
-def _mul14(value: int) -> int:
-    return _mul8(value) ^ _mul4(value) ^ _mul3(value)
+def _g(value: int) -> int:
+    return _y(value) ^ _r(value) ^ _q(value)
 
 
 def _mix_tail(values: list[int]) -> list[int]:
     first, second, third, fourth = values[:4]
     return [
-        _mul14(first) ^ _mul8(second) ^ _mul4(third) ^ _mul3(fourth),
-        _mul3(first) ^ _mul14(second) ^ _mul8(third) ^ _mul4(fourth),
-        _mul4(first) ^ _mul3(second) ^ _mul14(third) ^ _mul8(fourth),
-        _mul8(first) ^ _mul4(second) ^ _mul3(third) ^ _mul14(fourth),
+        _g(first) ^ _y(second) ^ _r(third) ^ _q(fourth),
+        _q(first) ^ _g(second) ^ _y(third) ^ _r(fourth),
+        _r(first) ^ _q(second) ^ _g(third) ^ _y(fourth),
+        _y(first) ^ _r(second) ^ _q(third) ^ _g(fourth),
         *values[4:],
     ]
+
+
+def generate_workshop_rnd(timestamp: int, nonce: str) -> str:
+    """Build the v15 HMAC-SHA256 query signature used by web comment writes."""
+
+    message = f"{_WORKSHOP_RND_KEY}{nonce}{timestamp}:{nonce}".encode("utf-8")
+    signature = hmac.new(
+        _WORKSHOP_RND_KEY.encode("utf-8"), message, hashlib.sha256
+    ).hexdigest()
+    return f"{_WORKSHOP_RND_VERSION}:{signature}"

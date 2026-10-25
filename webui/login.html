@@ -21,6 +21,11 @@
     button { border: 0; border-radius: 8px; padding: 9px 14px; cursor: pointer; color: var(--maibot-primary-foreground, #fff); background: var(--maibot-primary, #4f46e5); }
     button:disabled { cursor: wait; opacity: .6; }
     .tip { margin-top: 18px; font-size: 13px; }
+    .help { margin-top: 20px; padding: 14px 16px; border-radius: 10px; background: var(--maibot-soft, #eef2ff); }
+    .help strong { display: block; margin-bottom: 6px; }
+    .help ul { margin: 8px 0 0 18px; padding: 0; line-height: 1.7; }
+    .success { color: #15803d; }
+    .warning { color: #b45309; }
   </style>
 </head>
 <body class="maibot-page">
@@ -35,6 +40,14 @@
         <span class="muted" id="countdown"></span>
       </div>
       <p class="tip muted">登录会话只保存在插件专属数据目录；页面不会显示或复制原始登录链接。</p>
+      <div class="help">
+        <strong>使用说明</strong>
+        <ul>
+          <li>扫码成功后保持本页打开，页面会自动检查登录结果。</li>
+          <li>评论、提及和楼中楼回复由运营轮询处理，私信暂未接入。</li>
+          <li>配置页中建议把浏览间隔设为 3600 秒，测试阶段把每日发帖设为 0。</li>
+        </ul>
+      </div>
     </section>
   </main>
   <script type="module">

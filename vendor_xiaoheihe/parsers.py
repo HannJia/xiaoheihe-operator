@@ -10,6 +10,8 @@ from urllib.parse import parse_qsl, urlsplit
 from .models import (
     ApiPage,
     Credentials,
+    DirectMessage,
+    DirectMessagePage,
     LoginState,
     Notification,
     NotificationType,
@@ -610,6 +612,33 @@ def parse_thread_context(payload: Mapping[str, Any], post_id: str) -> ThreadCont
     if not isinstance(raw_comments, list):
         raise ResponseShapeError("楼层评论字段不是数组")
     comments = [dict(item) for item in raw_comments if isinstance(item, Mapping)]
+
+    # The web post-tree endpoint returns a root-specific readback under
+    # result.current_comment.comment. Keep the top-level list when it is
+    # present, then append the selected root so comment verification and
+    # nested-reply routing can inspect the actual returned floor.
+    current_comment = body.get("current_comment")
+    if isinstance(current_comment, Mapping):
+        current_items = _first(
+            current_comment,
+            "comment",
+            "comments",
+            "comment_list",
+            default=[],
+        )
+        if isinstance(current_items, list):
+            comments.extend(dict(item) for item in current_items if isinstance(item, Mapping))
+
+    deduped_comments: list[dict[str, Any]] = []
+    seen_comment_ids: set[str] = set()
+    for item in comments:
+        comment_id = _id(item, "commentid", "comment_id", "reply_id", "id")
+        if comment_id and comment_id in seen_comment_ids:
+            continue
+        if comment_id:
+            seen_comment_ids.add(comment_id)
+        deduped_comments.append(item)
+    comments = deduped_comments
     post_body, embedded_images = _rich_post_content(
         _first(post_obj, "content", "text", "description")
     )
@@ -714,3 +743,144 @@ def _find_comment_id(value: Any) -> str:
             if nested:
                 return nested
     return ""
+
+
+def parse_direct_message_page(
+    profile_id: str,
+    payload: Mapping[str, Any],
+    *,
+    owner_uid: str,
+    conversation_id: str = "",
+    page_size: int = 20,
+    source: str = "",
+) -> DirectMessagePage:
+    """Parse the two known private-message read routes without assuming one schema.
+
+    Xiaoheihe's private-message responses are not the same contract as the
+    notification center. Keep this parser deliberately tolerant and return a
+    response-shape error when no message collection can be identified.
+    """
+    root: Any = payload
+    if isinstance(payload, Mapping):
+        root = payload.get("result", payload.get("data", payload))
+    raw_items = _find_message_list(root)
+    if raw_items is None:
+        raise ResponseShapeError("私信响应缺少消息列表字段")
+
+    messages: list[DirectMessage] = []
+    owner = str(owner_uid or "").strip()
+    for raw in raw_items:
+        if not isinstance(raw, Mapping):
+            continue
+        text = str(_first(raw, "content", "text", "message", "msg", "body", default=""))
+        message_id = _id(raw, "message_id", "msg_id", "messageid", "id")
+        sender_uid = _id(
+            raw,
+            "sender_uid",
+            "from_uid",
+            "sender_id",
+            "from_user_id",
+            "user_heybox_id",
+            "user_id",
+            "userid",
+            "uid",
+        )
+        sender_name = str(
+            _first(raw, "sender_name", "sender_nickname", "from_nickname", "nickname", "username", "name")
+        )
+        direction = str(_first(raw, "direction", "send_type", "type", default="")).casefold()
+        outgoing_marker = direction in {"out", "outgoing", "send", "sent", "self", "1"}
+        incoming = not outgoing_marker if direction else sender_uid != owner
+        if sender_uid and sender_uid == owner:
+            incoming = False
+        peer_uid = _id(raw, "peer_uid", "target_uid", "to_uid", "to_user_id", "friend_uid")
+        if not peer_uid and sender_uid and sender_uid != owner:
+            peer_uid = sender_uid
+        if not peer_uid:
+            peer_uid = _id(raw, "user_id", "userid", "uid")
+            if peer_uid == owner:
+                peer_uid = ""
+        item_conversation = _id(
+            raw,
+            "conversation_id",
+            "conversationid",
+            "session_id",
+            "chat_id",
+            "room_id",
+        )
+        effective_conversation = item_conversation or conversation_id or (f"dm!{peer_uid}" if peer_uid else "")
+        created_at = _timestamp(
+            _first(raw, "created_at", "create_time", "send_time", "timestamp", "time", default=0)
+        )
+        if not message_id:
+            digest_source = json.dumps(
+                {
+                    "conversation": effective_conversation,
+                    "sender": sender_uid,
+                    "text": text,
+                    "created_at": created_at,
+                    "raw": dict(raw),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            )
+            message_id = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()[:32]
+        if not message_id or (not text and not raw):
+            continue
+        messages.append(
+            DirectMessage(
+                profile_id=profile_id,
+                message_id=message_id,
+                conversation_id=effective_conversation,
+                sender_uid=sender_uid,
+                sender_name=sender_name,
+                text=text,
+                created_at=created_at,
+                incoming=incoming,
+                peer_uid=peer_uid,
+                raw=dict(raw),
+            )
+        )
+
+    meta = root if isinstance(root, Mapping) else {}
+    next_cursor = str(
+        _first(meta, "next_cursor", "next_offset", "next_page", "cursor", default="")
+    )
+    has_more_value = _first(meta, "has_more", "has_next", "more", default=False)
+    has_more = bool(has_more_value) and str(has_more_value).casefold() not in {"0", "false", "no"}
+    if not next_cursor and has_more:
+        next_cursor = str(max(0, len(messages)))
+    return DirectMessagePage(
+        items=messages,
+        next_cursor=next_cursor,
+        has_more=has_more,
+        source=source,
+    )
+
+
+def _find_message_list(value: Any) -> list[Any] | None:
+    if isinstance(value, list):
+        return value
+    if not isinstance(value, Mapping):
+        return None
+    preferred = (
+        "messages",
+        "message_list",
+        "msg_list",
+        "records",
+        "items",
+        "list",
+        "data",
+        "result",
+    )
+    for key in preferred:
+        candidate = value.get(key)
+        if isinstance(candidate, list):
+            return candidate
+    for key in preferred:
+        candidate = value.get(key)
+        found = _find_message_list(candidate)
+        if found is not None:
+            return found
+    return None

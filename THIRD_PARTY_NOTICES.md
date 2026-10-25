@@ -8,9 +8,12 @@ The upstream license text is kept in `LICENSE`.
 
 Additional references:
 
-- `opxqo/xiaoheihe-cli` is an interface and behavior reference for the
-  Xiaoheihe web post contract and `img` content block shape. Its code is not
-  bundled here.
+- `AaronZ345/xiaoheihe-cli` is an interface and behavior reference for the
+  comment dry-run/readback boundary and Xiaoheihe web post `img` block. Its
+  code is not bundled here.
+- The repositories listed in `REFERENCES.md` are behavior and contract
+  references only; their code is not bundled here unless the notice above
+  explicitly says it is derived code.
 - MaiBot official plugin documentation defines the Manifest, lifecycle,
   capability, WebUI and marketplace requirements used by this plugin.
 - `maimai-drawpic-plugin`, `org.orge-8.life-frequency`, and
