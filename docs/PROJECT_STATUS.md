@@ -2,7 +2,7 @@
 
 Snapshot date: 2026-10-26 (Asia/Shanghai)
 
-The full handoff is in `docs/handoff/2026-10-26-小黑盒插件发布交接.md` in the workspace. The local fix version is `0.4.1`; the previous public release is `0.4.0`.
+The full handoff is in `docs/handoff/2026-10-26-小黑盒插件发布交接.md` in the workspace. The current release is `0.4.1`.
 
 ## Release scope
 
@@ -13,9 +13,9 @@ Direct-message automation is outside this release. It is disabled by default and
 ## Release and marketplace state
 
 - GitHub repository: `https://github.com/HannJia/xiaoheihe-operator`
-- Previous GitHub release: `v0.4.0`; v0.4.1 is prepared locally and must be released after final validation.
+- GitHub release: `v0.4.1`, published after the dry-run fix passed local validation.
 - MaiBot plugin-repo Issue #1000 has returned `Validation Passed` after the Issue Form body was corrected.
-- The issue shows `5/8` review attempts. The latest feedback identified a dry-run proactive-post gap; publish v0.4.1 before the next required `/recheck`.
+- The latest v0.4.1 automatic validation passed. The issue shows `6/8` review attempts and is waiting for maintainer approval. Do not trigger another `/recheck`.
 - The published icon is the user-provided Xiaoheihe-style image in `assets/icon.png`.
 
 ## Defaults and server notes
