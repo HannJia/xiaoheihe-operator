@@ -16,6 +16,7 @@ Direct-message automation is outside this release. It is disabled by default and
 - GitHub release: `v0.4.1`, published after the dry-run fix passed local validation.
 - MaiBot plugin-repo Issue #1000 has returned `Validation Passed` after the Issue Form body was corrected.
 - The latest v0.4.1 automatic validation passed. The issue shows `6/8` review attempts and is waiting for maintainer approval. Do not trigger another `/recheck`.
+- The remaining suggestions are non-blocking: safer credential temp-file replacement and a cooldown for QR login Tools.
 - The published icon is the user-provided Xiaoheihe-style image in `assets/icon.png`.
 
 ## Defaults and server notes
