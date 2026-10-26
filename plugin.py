@@ -1526,6 +1526,13 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         )
         if not self._store.begin_outgoing(action):
             return
+        if str(self.config.mode).lower() == "dry_run":
+            self._store.update_outgoing(action_key, OutgoingStatus.DRY_RUN)
+            self.ctx.logger.info(
+                "小黑盒主动发帖处于 dry_run，已记录草稿但未调用外部发帖接口：%s",
+                action_key[:28],
+            )
+            return
         external_send_started = False
         stage = "prepare"
         try:

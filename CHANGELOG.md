@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.1 - 2026-10-26
+
+- Fixed the proactive-post send boundary so `dry_run` records the generated draft without image generation, image upload, or a Xiaoheihe `create_post` request.
+- Added a regression test covering `dry_run` with image generation enabled.
+
 ## 0.4.0 - 2026-10-26
 
 - Added independent server-local time windows for recommendation browsing/active comments and proactive posts.
