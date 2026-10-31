@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.0 - 2026-11-01
+
+- Persona now follows the host MaiBot by default: comments, replies and posts use `bot.nickname` and `personality.personality` (the same identity the host replyer uses), re-read at most once a minute so WebUI persona edits and profile switches take effect without a restart. The previous hard-coded studio persona has been removed.
+- Added the optional `[content] persona_override` field to give Xiaoheihe a different identity or tone; when the host persona cannot be read and no override is set, a neutral gamer persona is used. Declared the `config.get` capability for this.
+- Reworked recommendation-feed browsing: the interval is randomised between 0.5× and 1.5× `feed_interval_seconds`; each session opens 2–4 posts in feed order; comments and likes only go to posts that pass the game filter; the daily comment quota is spread over the remaining sessions; the first session after a restart is delayed by 2–15 minutes.
+- Added post likes (`POST /bbs/app/profile/award/link`) with the new `likes_per_day` quota (default 3). Each post is liked at most once and likes do not consume the comment cooldown.
+- Browsing and proactive posting pause while the linked life-frequency plugin reports the persona as asleep or napping.
+- Rewrote the comment prompts: proactive comments and replies to others use separate instructions, avoid restating the post and avoid stock phrases; output limits raised to 600 tokens for comments and 900 for posts to stop truncation.
+- Fixed optional image generation failures so a timed-out drawing task is recorded and the independent Xiaoheihe text-post path can continue.
+- Added nested task-payload handling and audit markers for image fallback; no new drawing request is created during fallback.
+- Raised the SDK upper bound to 2.99.99; tested with MaiBot 1.3.12 (SDK 2.12.0) and 1.3.19 (SDK 2.20.0).
+
 ## 0.4.1 - 2026-10-26
 
 - Fixed the proactive-post send boundary so `dry_run` records the generated draft without image generation, image upload, or a Xiaoheihe `create_post` request.

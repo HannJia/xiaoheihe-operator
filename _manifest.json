@@ -1,9 +1,9 @@
 {
   "manifest_version": 2,
   "id": "org.orge-8.xiaoheihe-operator",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "name": "小黑盒运营",
-  "description": "将 maibot 的生活轨迹、游戏话题和配图能力接入小黑盒社区。",
+  "description": "让 MaiBot 用自己的人设在小黑盒逛帖、点赞、评论和发帖，可联动生活轨迹和配图。",
   "author": {
     "name": "HannJia",
     "url": "https://github.com/HannJia"
@@ -26,11 +26,12 @@
   },
   "sdk": {
     "min_version": "2.12.0",
-    "max_version": "2.12.99"
+    "max_version": "2.99.99"
   },
   "dependencies": [],
   "capabilities": [
     "api.call",
+    "config.get",
     "llm.generate"
   ],
   "i18n": {

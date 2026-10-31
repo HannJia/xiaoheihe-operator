@@ -28,6 +28,36 @@ class PersonaContextProvider:
         self._life_cache_at = 0.0
         self._identity_cache: bytes | None = None
         self._identity_checked_at = 0.0
+        self._host_persona_cache = ""
+        self._host_persona_at: float | None = None
+
+    async def host_persona(self) -> str:
+        """读宿主的昵称和人格设定，和 MaiBot 自己的回复用同一份人设。
+
+        拼法与宿主 replyer 一致：「你的名字是{昵称}。」换行接人格。WebUI 改人设或切换
+        人设方案后，宿主会把生效的人格写回 personality.personality，这里最多 60 秒后跟上。
+        读不到时返回空字符串，由调用方用中性人设兜底。
+        """
+
+        now = time.monotonic()
+        if self._host_persona_at is not None and now - self._host_persona_at < 60:
+            return self._host_persona_cache
+        nickname = personality = ""
+        try:
+            raw_nickname = await self.ctx.config.get("bot.nickname", "")
+            raw_personality = await self.ctx.config.get("personality.personality", "")
+            nickname = normalize_text(raw_nickname if isinstance(raw_nickname, str) else "", 40)
+            personality = normalize_text(raw_personality if isinstance(raw_personality, str) else "", 1500)
+        except Exception as exc:  # noqa: BLE001
+            self.ctx.logger.debug("宿主人设暂不可读：%s", type(exc).__name__)
+        lines = []
+        if nickname:
+            lines.append(f"你的名字是{nickname}。")
+        if personality:
+            lines.append(personality)
+        self._host_persona_cache = "\n".join(lines)
+        self._host_persona_at = now
+        return self._host_persona_cache
 
     async def life_context(self) -> str:
         now = time.monotonic()

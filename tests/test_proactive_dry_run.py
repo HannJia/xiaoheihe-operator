@@ -20,6 +20,9 @@ class _Persona:
     async def life_context(self):
         return "今天适合分享游戏日常。"
 
+    async def identity_reference(self):
+        return b"reference"
+
 
 class _Client:
     def __init__(self):
@@ -36,6 +39,36 @@ class _Client:
     async def create_post(self, **kwargs):
         self.create_post_calls += 1
         raise AssertionError("dry_run 不应调用 create_post")
+
+
+class _FailingDrawing:
+    async def submit(self, *args, **kwargs):
+        return {"task_id": "task-timeout"}
+
+    async def wait(self, *args, **kwargs):
+        raise RuntimeError("upstream timeout")
+
+
+class _PublishClient:
+    def __init__(self):
+        self.posts = []
+
+    async def resolve_topic_names(self, names):
+        return {name: str(index + 100) for index, name in enumerate(names)}
+
+    async def upload_image_bytes(self, *args, **kwargs):
+        raise AssertionError("配图失败降级时不应上传图片")
+
+    async def create_post(self, **kwargs):
+        self.posts.append(kwargs)
+        return {"link_id": "post-text-fallback"}
+
+    async def fetch_thread_context(self, post_id, *, root_comment_id=""):
+        return SimpleNamespace(
+            title="测试草稿标题",
+            body="测试草稿正文",
+            image_urls=[],
+        )
 
 
 class ProactiveDryRunTests(unittest.TestCase):
@@ -74,6 +107,41 @@ class ProactiveDryRunTests(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["status"], OutgoingStatus.DRY_RUN.value)
             self.assertEqual(rows[0]["metadata"]["title"], "测试草稿标题")
+            plugin._store.close()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            asyncio.run(run(Path(tmp)))
+
+    def test_image_failure_falls_back_to_verified_text_post(self):
+        async def run(directory: Path):
+            plugin = self.plugin_type()
+            plugin.config = plugin.config_model()
+            plugin.config.basic.enabled = True
+            plugin.config.basic.mode = "auto"
+            plugin.config.automation.post_active_start_time = "00:00"
+            plugin.config.automation.post_active_end_time = "00:00"
+            plugin.config.automation.post_target_primary = "Steam"
+            plugin.config.automation.post_target_secondary = ""
+            plugin.config.content.generate_post_images = True
+            plugin._store = OperatorStore(directory / "state.db")
+            plugin._generator = _Generator()
+            plugin._persona = _Persona()
+            plugin._drawing = _FailingDrawing()
+            plugin.ctx = SimpleNamespace(logger=_Logger())
+            client = _PublishClient()
+
+            await plugin._create_proactive_post(client)
+
+            self.assertEqual(len(client.posts), 1)
+            self.assertEqual(
+                client.posts[0]["content_blocks"],
+                [{"type": "text", "text": "测试草稿正文"}],
+            )
+            row = plugin._store.list_outgoing(limit=1)[0]
+            self.assertEqual(row["status"], OutgoingStatus.VERIFIED.value)
+            self.assertEqual(row["external_id"], "post-text-fallback")
+            self.assertTrue(row["metadata"]["image_fallback"])
+            self.assertFalse(row["metadata"]["image_required"])
             plugin._store.close()
 
         with tempfile.TemporaryDirectory() as tmp:

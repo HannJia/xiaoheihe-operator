@@ -14,6 +14,13 @@
 - 评论写入不附加通用的 `heybox_id` 和 `device_id` 字段。
 - `_time`、`nonce`、`hkey` 和 v15 `_rnd` 在请求边界统一生成。
 
+## 帖子点赞边界（0.5.0）
+
+- 地址：`https://api.xiaoheihe.cn/bbs/app/profile/award/link`
+- 方法：`POST`，表单 `link_id`、`award_type`；`award_type=1` 点赞，`0` 取消。插件只发送 `1`，重复发送不会叠加。
+- 读回：帖子详情里的 `is_award_link` 从 `0` 变成 `1`。
+- 来源：参考 `lumingfei004/dph-heybox` 的抓包记录，不是小黑盒公开文档；每天的点赞数量由 `likes_per_day` 限制。
+
 ## 结果与幂等边界
 
 写请求超时、连接中断或响应形状无法确认时记录为 `send_unknown`，不自动重发。真实发送前先把动作标记为 `sending`；重启后只读帖子树核验，不根据未知结果再次写入。通知事件和动作键使用 SQLite 唯一键，已尝试的通知不会重复回复。

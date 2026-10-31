@@ -147,3 +147,27 @@ class CommentRequestContractTests(unittest.TestCase):
 
         self.assertEqual(len(transport.calls), 1)
         await client.close()
+
+    def test_like_post_uses_web_form_write_contract(self):
+        asyncio.run(self._assert_like_request())
+
+    async def _assert_like_request(self):
+        transport = _RecordingClient()
+        client = _make_client(transport)
+
+        await client.like_post("1000")
+
+        assert len(transport.calls) == 1
+        method, path, request = transport.calls[0]
+        assert method == "POST"
+        assert path == "/bbs/app/profile/award/link"
+        assert request["data"] == {"link_id": "1000", "award_type": "1"}
+        params = request["params"]
+        assert params["web_version"] == "3.0"
+        assert "heybox_id" not in params
+        assert "device_id" not in params
+        assert params["hkey"] == generate_hkey(
+            "/bbs/app/profile/award/link", int(params["_time"]), params["nonce"]
+        )
+        assert params["_rnd"] == generate_workshop_rnd(int(params["_time"]), params["nonce"])
+        await client.close()

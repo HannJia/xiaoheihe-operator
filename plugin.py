@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import random
+import re
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -36,6 +38,20 @@ MAX_ALLOWLIST_ITEMS = 10
 MAX_POST_TARGETS = 2
 
 
+def _hhmm_to_minutes(value: object) -> int | None:
+    text = str(value or "").strip()
+    parts = text.split(":")
+    if len(parts) != 2:
+        return None
+    try:
+        hour, minute = int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return hour * 60 + minute
+
+
 def _time_window_active(start: str, end: str, now: float | None = None) -> bool:
     """判断服务器本地时间是否落在 HH:MM 时间窗口内。
 
@@ -43,21 +59,8 @@ def _time_window_active(start: str, end: str, now: float | None = None) -> bool:
     配置格式不合法时安全返回 False，避免意外自动执行。
     """
 
-    def to_minutes(value: object) -> int | None:
-        text = str(value or "").strip()
-        parts = text.split(":")
-        if len(parts) != 2:
-            return None
-        try:
-            hour, minute = int(parts[0]), int(parts[1])
-        except ValueError:
-            return None
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            return None
-        return hour * 60 + minute
-
-    start_minutes = to_minutes(start)
-    end_minutes = to_minutes(end)
+    start_minutes = _hhmm_to_minutes(start)
+    end_minutes = _hhmm_to_minutes(end)
     if start_minutes is None or end_minutes is None:
         return False
     if start_minutes == end_minutes:
@@ -67,6 +70,34 @@ def _time_window_active(start: str, end: str, now: float | None = None) -> bool:
     if start_minutes < end_minutes:
         return start_minutes <= current_minutes < end_minutes
     return current_minutes >= start_minutes or current_minutes < end_minutes
+
+
+def _window_seconds_left(start: str, end: str, now: float | None = None) -> float:
+    """当前时间窗口今天还剩多少秒；额度按自然日重置，所以最多算到午夜。
+
+    不在窗口内或配置不合法时返回 0；全天窗口返回距午夜的秒数。
+    """
+
+    current_ts = time.time() if now is None else now
+    if not _time_window_active(start, end, current_ts):
+        return 0.0
+    current = time.localtime(current_ts)
+    current_seconds = current.tm_hour * 3600 + current.tm_min * 60 + current.tm_sec
+    to_midnight = 86400 - current_seconds
+    start_minutes = _hhmm_to_minutes(start)
+    end_minutes = _hhmm_to_minutes(end)
+    if start_minutes is None or end_minutes is None or start_minutes == end_minutes:
+        return float(to_midnight)
+    end_seconds = end_minutes * 60
+    if end_seconds > current_seconds:
+        return float(end_seconds - current_seconds)
+    # 跨午夜窗口且现在在午夜前：今天的额度只到午夜。
+    return float(to_midnight)
+
+
+# 生活频率 get_current_context 的首行形如「当前活动：睡觉（卧室）」。
+# 只认睡觉和小睡；「准备睡觉」时人还醒着，可以刷手机。
+_ASLEEP_PATTERN = re.compile(r"当前活动[：:]\s*(?:睡觉|小睡)")
 
 # Literal 让 MaiBot SDK 自动生成真正的下拉框和选项；显示给用户的是中文名称，
 # 插件运行时再通过小黑盒搜索接口解析为内部 topic_id。
@@ -185,7 +216,7 @@ class XiaoheiheBrowseSection(PluginConfigBase):
     )
     feed_interval_seconds: int = _ui_field(
         label="推荐流浏览间隔（秒）",
-        hint="读取推荐流的间隔；发布版推荐 600 秒（10 分钟），可按账号活跃度和模型额度自行调整。",
+        hint="两次逛推荐流的平均间隔；每次实际间隔在它的 0.5–1.5 倍之间随机，不会整点触发。发布版推荐 600 秒（10 分钟），可按账号活跃度和模型额度自行调整。",
         order=1,
         default=600,
         step=300,
@@ -232,6 +263,13 @@ class XiaoheiheAutomationSection(PluginConfigBase):
         hint="每天最多对推荐流帖子发表评论的数量；设为 0 表示关闭主动评论。",
         order=1,
         default=1,
+        step=1,
+    )
+    likes_per_day: int = _ui_field(
+        label="每日点赞数",
+        hint="逛推荐流时给符合游戏筛选的帖子点赞，每天最多这么多个，同一帖子只赞一次；设为 0 表示不点赞。",
+        order=9,
+        default=3,
         step=1,
     )
     notification_replies_per_day: int = _ui_field(
@@ -304,22 +342,29 @@ class XiaoheiheContentSection(PluginConfigBase):
     __ui_icon__ = "puzzle"
     __ui_order__ = 4
 
+    persona_override: str = _ui_field(
+        label="小黑盒人设（可选）",
+        hint="留空时使用 MaiBot 主配置里的昵称和人格设定，和 QQ 上是同一个人。只有想让小黑盒上的身份或口吻不一样时才填写，填写后只影响本插件生成的评论、回复和帖子。",
+        order=0,
+        default="",
+        json_schema_extra={"x-widget": "textarea"},
+    )
     generate_post_images: bool = _ui_field(
         label="自动生成帖子图片",
         hint="可选联动「麦麦绘图」（ID：maimai-drawpic-plugin）。开启后生成帖子图片；未安装联动插件时请关闭，关闭后仍可纯文本自动发帖。",
-        order=0,
+        order=1,
         default=False,
     )
     life_context_api: str = _ui_field(
         label="生活轨迹 API",
         hint="可选联动「生活频率」（ID：org.orge-8.life-frequency）；当前完整 API 是 org.orge-8.life-frequency.get_current_context，只读调用。未安装时会自动退回当前时间和已有设定，不影响纯文本发帖。",
-        order=1,
+        order=2,
         default="org.orge-8.life-frequency.get_current_context",
     )
     identity_reference_api: str = _ui_field(
         label="身份参考图 API",
         hint="可选联动「自我身份档案」（ID：org.mai-mai.self-identity）；当前完整 API 是 org.mai-mai.self-identity.get_default_reference_image，只读调用。只在生成图片时作为参考图使用，未安装时会自动跳过。",
-        order=2,
+        order=3,
         default="org.mai-mai.self-identity.get_default_reference_image",
     )
 
@@ -425,6 +470,10 @@ class XiaoheiheConfig(PluginConfigBase):
         return self.automation.proactive_comments_per_day
 
     @property
+    def likes_per_day(self) -> int:
+        return self.automation.likes_per_day
+
+    @property
     def notification_replies_per_day(self) -> int:
         return self.automation.notification_replies_per_day
 
@@ -473,6 +522,10 @@ class XiaoheiheConfig(PluginConfigBase):
         return self.automation.community_allowlist
 
     @property
+    def persona_override(self) -> str:
+        return self.content.persona_override
+
+    @property
     def generate_post_images(self) -> bool:
         return self.content.generate_post_images
 
@@ -514,6 +567,7 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         "game_topic_hints": "browse",
         "posts_per_day": "automation",
         "proactive_comments_per_day": "automation",
+        "likes_per_day": "automation",
         "notification_replies_per_day": "automation",
         "send_cooldown_seconds": "automation",
         "post_active_start_time": "automation",
@@ -522,6 +576,7 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         "post_target_primary": "automation",
         "post_target_secondary": "automation",
         "post_topic_ids": "automation",
+        "persona_override": "content",
         "generate_post_images": "content",
         "life_context_api": "content",
         "identity_reference_api": "content",
@@ -544,7 +599,8 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         self._persona: PersonaContextProvider | None = None
         self._worker: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
-        self._last_feed_at = 0.0
+        self._next_feed_at = 0.0
+        self._rng = random.Random()
         self._last_dm_poll_at = 0.0
         self._topic_id_cache: dict[str, str] = {}
 
@@ -659,15 +715,42 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         self._dm_store = DirectMessageStore(data_dir / "state.db")
         self._drawing = DrawingGateway(self.ctx.api)
         self._runtime = XiaoheiheRuntime(data_dir, self.config.profile_id)
-        self._generator = ContentGenerator(self.ctx.llm)
         self._persona = PersonaContextProvider(
             self.ctx,
             life_api_name=str(self.config.life_context_api),
             identity_api_name=str(self.config.identity_reference_api),
         )
+        self._generator = ContentGenerator(self.ctx.llm, persona=self._persona_identity)
+        # 重启后不立刻去逛，过一会儿再打开，避免每次重启都在同一时刻出现一轮动作。
+        self._next_feed_at = time.time() + self._rng.uniform(120, 900)
         self.ctx.logger.info("小黑盒运营插件已加载：enabled=%s mode=%s", self.config.enabled, self.config.mode)
+        await self._log_persona_source()
         if self.config.enabled:
             self._start_worker()
+
+    async def _persona_identity(self) -> str:
+        """生成内容用的人设：插件里单独填写的优先，否则跟随宿主 MaiBot 的昵称和人格。"""
+
+        override = str(self.config.persona_override or "").strip()
+        if override:
+            return override
+        if self._persona is None:
+            return ""
+        return await self._persona.host_persona()
+
+    async def _log_persona_source(self) -> None:
+        try:
+            override = str(self.config.persona_override or "").strip()
+            text = override or (await self._persona.host_persona() if self._persona is not None else "")
+        except Exception as exc:  # noqa: BLE001
+            self.ctx.logger.warning("小黑盒人设读取失败，先用默认人设：%s", type(exc).__name__)
+            return
+        if not text:
+            self.ctx.logger.warning("小黑盒没读到宿主人设，先用默认人设；可检查 bot.nickname 和 personality 配置")
+            return
+        source = "插件配置" if override else "宿主 MaiBot"
+        first_line = text.splitlines()[0][:24]
+        self.ctx.logger.info("小黑盒人设来源：%s（%d 字，%s…）", source, len(text), first_line)
 
     async def on_unload(self) -> None:
         self._stop.set()
@@ -731,8 +814,8 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         if self.config.dm_enabled and now - self._last_dm_poll_at >= max(60, int(self.config.dm_poll_interval_seconds)):
             self._last_dm_poll_at = now
             await self._poll_direct_messages(client)
-        if now - self._last_feed_at >= max(300, int(self.config.feed_interval_seconds)):
-            self._last_feed_at = now
+        if now >= self._next_feed_at:
+            self._next_feed_at = now + self._next_feed_gap()
             if post_window_active or browse_window_active:
                 await self._proactive_once(
                     client,
@@ -1227,7 +1310,11 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
     def _cooldown_ready(self, *, exclude_action_key: str = "") -> bool:
         if self._store is None:
             return False
-        previous = self._store.last_outgoing_at(exclude_action_key=exclude_action_key)
+        # 点赞不占评论和回复的发送冷却。
+        previous = self._store.last_outgoing_at(
+            exclude_action_key=exclude_action_key,
+            exclude_kinds=("post_like",),
+        )
         if previous is None:
             return True
         return time.time() - previous >= max(0, int(self.config.send_cooldown_seconds))
@@ -1336,6 +1423,9 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
                     )
                     if route.post_id and await self._verify_comment(client, route, str(row.get("content") or "")):
                         self._store.update_outgoing(row["action_key"], OutgoingStatus.VERIFIED)
+                elif row.get("kind") == "post_like":
+                    # 点赞中途重启：点赞可安全重做，记 failed 让以后的浏览重新判断。
+                    self._store.update_outgoing(row["action_key"], OutgoingStatus.FAILED, error="interrupted")
                 elif row.get("kind") == "proactive_post":
                     link_id = str(
                         metadata.get("link_id")
@@ -1374,20 +1464,44 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
                 self.config.feed_active_start_time,
                 self.config.feed_active_end_time,
             )
+        if not (post_window_active or browse_window_active):
+            return
+        if await self._persona_asleep():
+            self.ctx.logger.info("小黑盒本次不逛：生活状态显示她在睡觉或小睡")
+            return
         if post_window_active and self._within_quota("proactive_post", int(self.config.posts_per_day)):
             await self._create_proactive_post(client)
-        if not browse_window_active:
-            return
-        if self._within_quota("proactive_comment", int(self.config.proactive_comments_per_day)):
-            try:
-                page = await client.fetch_feed(offset=0)
-            except Exception as exc:  # noqa: BLE001
-                self.ctx.logger.warning("小黑盒推荐流读取失败：%s", type(exc).__name__)
-                return
-            for item in page.items:
-                if self._feed_candidate(item):
-                    await self._comment_on_feed_item(client, item)
-                    break
+        if browse_window_active:
+            await self._browse_session(client)
+
+    def _next_feed_gap(self) -> float:
+        """下次逛推荐流的间隔：配置值的 0.5–1.5 倍，避免每天同一时刻出现。"""
+
+        base = max(300, int(self.config.feed_interval_seconds))
+        return base * self._rng.uniform(0.5, 1.5)
+
+    async def _persona_asleep(self) -> bool:
+        """生活频率显示她在睡觉或小睡时不刷小黑盒；读不到生活状态时按醒着处理。"""
+
+        if self._persona is None:
+            return False
+        try:
+            text = await self._persona.life_context()
+        except Exception:  # noqa: BLE001
+            return False
+        return bool(_ASLEEP_PATTERN.search(str(text or "")))
+
+    def _daily_chance(self, kind: str, limit: int, seconds_left: float, *, cap: float = 1.0) -> float:
+        """把当天剩余额度摊到剩余的浏览场次上，评论和点赞不会集中在上午用完。"""
+
+        if self._store is None or limit <= 0:
+            return 0.0
+        remaining = limit - self._store.count_since(kind, self._day_start())
+        if remaining <= 0:
+            return 0.0
+        sessions_left = max(1.0, seconds_left / max(300, int(self.config.feed_interval_seconds)))
+        # 一页推荐流里通常只有一条左右符合游戏筛选，所以按每场一次机会估算。
+        return max(0.0, min(cap, remaining / sessions_left))
 
     def _feed_candidate(self, item: object) -> bool:
         if not isinstance(item, dict):
@@ -1395,10 +1509,8 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         post_id = str(item.get("post_id") or item.get("link_id") or "")
         if not post_id:
             return False
-        if self._runtime and self._runtime.credentials:
-            author = item.get("author") if isinstance(item.get("author"), dict) else {}
-            if str(author.get("uid") or author.get("userid") or "") == str(self._runtime.credentials.uid):
-                return False
+        if self._is_own_feed_item(item):
+            return False
         allowlist_values = _normalize_selection_values(
             self.config.community_allowlist,
             max_items=MAX_ALLOWLIST_ITEMS,
@@ -1420,19 +1532,57 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
             return False
         return is_publishable(text)[0]
 
-    async def _comment_on_feed_item(self, client, item: dict[str, object]) -> None:
+    def _is_own_feed_item(self, item: dict[str, object]) -> bool:
+        if not (self._runtime and self._runtime.credentials):
+            return False
+        author = item.get("author") if isinstance(item.get("author"), dict) else {}
+        return str(author.get("uid") or author.get("userid") or "") == str(self._runtime.credentials.uid)
+
+    def _feed_readable(self, item: object) -> bool:
+        """可以点开看的帖子：有帖子 ID、不是自己发的。
+
+        只是点开看、不发任何内容，所以比评论和点赞的筛选宽；评论和点赞仍走 _feed_candidate。
+        """
+
+        if not isinstance(item, dict):
+            return False
+        if not str(item.get("post_id") or item.get("link_id") or ""):
+            return False
+        return not self._is_own_feed_item(item)
+
+    def _pick_posts_to_read(self, items: list[object]) -> list[dict[str, object]]:
+        """按推荐流顺序挑 2–4 篇点开：符合游戏筛选的必看，其余帖子随缘点开。"""
+
+        target = self._rng.randint(2, 4)
+        picked: list[dict[str, object]] = []
+        for item in items:
+            if len(picked) >= target:
+                break
+            if not self._feed_readable(item):
+                continue
+            if self._feed_candidate(item) or self._rng.random() < 0.35:
+                picked.append(item)  # type: ignore[arg-type]
+        return picked
+
+    async def _pause(self, low: float, high: float) -> None:
+        await asyncio.sleep(self._rng.uniform(low, high))
+
+    async def _comment_on_feed_item(self, client, item: dict[str, object], context=None) -> bool:
+        """返回是否真的发出了评论（模型给 SKIP 或内容不合规时返回 False）。"""
+
         assert self._store is not None and self._generator is not None
         post_id = str(item.get("post_id") or item.get("link_id") or "")
-        context = await client.fetch_thread_context(post_id)
         if context is None:
-            return
+            context = await client.fetch_thread_context(post_id)
+        if context is None:
+            return False
         reply = await self._generator.reply(
             post_title=str(getattr(context, "title", "")),
             post_body=str(getattr(context, "body", "")),
-            comment="请围绕这篇帖子自然分享一句。",
+            proactive=True,
         )
         if not reply or not is_publishable(reply)[0]:
-            return
+            return False
         action_key = f"feed_comment:{post_id}:{content_fingerprint(reply)}"
         action = OutgoingAction(
             action_key,
@@ -1442,13 +1592,79 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
             metadata={"post_id": post_id},
         )
         if not self._store.begin_outgoing(action):
-            return
+            return False
         await self._dispatch_comment(
             client,
             action_key=action_key,
             route=RoutingTarget(profile_id=self.config.profile_id, post_id=post_id),
             content=reply,
         )
+        return True
+
+    async def _browse_session(self, client) -> None:
+        """像人一样逛一次推荐流：点开几篇看，大多只看不评，偶尔点赞，最多评论一条。"""
+
+        try:
+            page = await client.fetch_feed(offset=0)
+        except Exception as exc:  # noqa: BLE001
+            self.ctx.logger.warning("小黑盒推荐流读取失败：%s", type(exc).__name__)
+            return
+        picked = self._pick_posts_to_read(list(page.items))
+        seconds_left = _window_seconds_left(
+            self.config.feed_active_start_time,
+            self.config.feed_active_end_time,
+        )
+        opened = commented = liked = 0
+        for item in picked:
+            post_id = str(item.get("post_id") or item.get("link_id") or "")
+            try:
+                context = await client.fetch_thread_context(post_id)
+            except Exception as exc:  # noqa: BLE001
+                self.ctx.logger.debug("小黑盒帖子打开失败：%s", type(exc).__name__)
+                continue
+            opened += 1
+            await self._pause(8, 40)
+            if not self._feed_candidate(item):
+                continue
+            did_comment = False
+            comment_chance = self._daily_chance(
+                "proactive_comment", int(self.config.proactive_comments_per_day), seconds_left
+            )
+            if not commented and self._rng.random() < comment_chance:
+                did_comment = await self._comment_on_feed_item(client, item, context)
+                commented += int(did_comment)
+            like_chance = self._daily_chance(
+                "post_like", int(self.config.likes_per_day), seconds_left, cap=0.7
+            )
+            if did_comment and like_chance > 0:
+                like_chance = max(like_chance, 0.5)
+            if self._rng.random() < like_chance and await self._like_feed_item(client, post_id):
+                liked += 1
+        self.ctx.logger.info(
+            "小黑盒逛了一次推荐流：点开 %s 篇，评论 %s 条，点赞 %s 个", opened, commented, liked
+        )
+
+    async def _like_feed_item(self, client, post_id: str) -> bool:
+        """给帖子点赞；同一帖子只记一次，返回是否新做了这次点赞。"""
+
+        assert self._store is not None
+        action_key = f"post_like:{post_id}"
+        action = OutgoingAction(action_key, "post_like", post_id, "", metadata={"post_id": post_id})
+        if not self._store.begin_outgoing(action):
+            return False
+        if str(self.config.mode).lower() == "dry_run":
+            self._store.update_outgoing(action_key, OutgoingStatus.DRY_RUN)
+            return True
+        self._store.update_outgoing(action_key, OutgoingStatus.SENDING, error="send_started")
+        try:
+            await client.like_post(post_id)
+        except Exception as exc:  # noqa: BLE001
+            # award_type=1 是「设为已赞」，以后重试不会重复计数，所以失败直接记 failed。
+            self._store.update_outgoing(action_key, OutgoingStatus.FAILED, error=_error_label(exc))
+            self.ctx.logger.warning("小黑盒点赞失败：%s", _error_label(exc))
+            return False
+        self._store.update_outgoing(action_key, OutgoingStatus.VERIFIED)
+        return True
 
     async def _create_proactive_post(self, client) -> None:
         if self._store is None or self._generator is None or self._persona is None:
@@ -1537,37 +1753,59 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         stage = "prepare"
         try:
             blocks: list[dict[str, str]] = [{"type": "text", "text": body}]
+            image_attached = False
             if self.config.generate_post_images:
-                stage = "draw_submit"
-                if self._drawing is None:
-                    raise RuntimeError("绘图网关未初始化")
-                reference = await self._persona.identity_reference()
-                prompt = f"maibot 的小黑盒生活分享配图：{title}。{body}。保持身份参考图中的人物形象一致。"
-                task = await self._drawing.submit(
-                    prompt,
-                    request_id=action.request_id,
-                    source_images=[reference] if reference else None,
-                )
-                stage = "draw_task_id"
-                task_id = _task_id(task)
-                if not task_id:
-                    raise RuntimeError("绘图任务未返回 task_id")
-                stage = "draw_wait"
-                finished = await self._drawing.wait(task_id, request_id=action.request_id)
-                if str(finished.get("status", "")) != "completed":
-                    raise RuntimeError("绘图任务未完成")
-                stage = "draw_read_image"
-                image_bytes = await self._drawing.read_image(task_id)
-                stage = "upload_image"
-                uploaded = await client.upload_image_bytes(image_bytes, filename=f"{fingerprint}.png")
-                blocks.append(
-                    {
-                        "type": "img",
-                        "url": str(uploaded["url"]),
-                        "width": int(uploaded.get("width") or 0),
-                        "height": int(uploaded.get("height") or 0),
-                    }
-                )
+                try:
+                    stage = "draw_submit"
+                    if self._drawing is None:
+                        raise RuntimeError("绘图网关未初始化")
+                    reference = await self._persona.identity_reference()
+                    prompt = f"maibot 的小黑盒生活分享配图：{title}。{body}。保持身份参考图中的人物形象一致。"
+                    task = await self._drawing.submit(
+                        prompt,
+                        request_id=action.request_id,
+                        source_images=[reference] if reference else None,
+                    )
+                    stage = "draw_task_id"
+                    task_id = _task_id(task)
+                    if not task_id:
+                        raise RuntimeError("绘图任务未返回 task_id")
+                    stage = "draw_wait"
+                    finished = await self._drawing.wait(task_id, request_id=action.request_id)
+                    if str(finished.get("status", "")).casefold() != "completed":
+                        raise RuntimeError("绘图任务未完成")
+                    stage = "draw_read_image"
+                    image_bytes = await self._drawing.read_image(task_id)
+                    stage = "upload_image"
+                    uploaded = await client.upload_image_bytes(image_bytes, filename=f"{fingerprint}.png")
+                    blocks.append(
+                        {
+                            "type": "img",
+                            "url": str(uploaded["url"]),
+                            "width": int(uploaded.get("width") or 0),
+                            "height": int(uploaded.get("height") or 0),
+                        }
+                    )
+                    image_attached = True
+                except Exception as exc:  # noqa: BLE001
+                    # Image generation is optional. A provider timeout or a
+                    # stale task must not block the independent text-post
+                    # path, and must not cause the same image task to be
+                    # submitted again with a new request id.
+                    fallback_reason = f"{stage}:{type(exc).__name__}"
+                    self._store.merge_outgoing_metadata(
+                        action_key,
+                        {
+                            "image_required": False,
+                            "image_fallback": True,
+                            "image_fallback_reason": fallback_reason,
+                        },
+                    )
+                    self.ctx.logger.warning(
+                        "小黑盒配图失败，已降级为纯文字发帖：stage=%s error=%s",
+                        stage,
+                        type(exc).__name__,
+                    )
 
             stage = "create_post"
             external_send_started = True
@@ -1586,7 +1824,7 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
                 title,
                 body,
                 context,
-                require_image=bool(self.config.generate_post_images),
+                require_image=image_attached,
             ):
                 self._store.update_outgoing(action_key, OutgoingStatus.VERIFIED, external_id=link_id)
             else:
@@ -1665,7 +1903,8 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
             },
             "settings_help": {
                 "mode": "dry_run 只记录计划；auto 才会真实发送",
-                "feed_interval_seconds": "推荐 600 秒，即每 10 分钟浏览一次；这是插件默认建议，不是小黑盒官方固定检查时间",
+                "feed_interval_seconds": "两次逛推荐流的平均间隔，实际在 0.5–1.5 倍之间随机；推荐 600 秒。每次点开 2–4 篇，多数只看不评",
+                "likes_per_day": "每天最多点赞数；只赞符合游戏筛选的帖子，同一帖子只赞一次",
                 "feed_active_window": f"AI 浏览和主动评论只在服务器本地时间 {self.config.feed_active_start_time}-{self.config.feed_active_end_time} 运行；与发帖时间窗口独立",
                 "post_active_window": f"主动发帖和发送前失败重试只在服务器本地时间 {self.config.post_active_start_time}-{self.config.post_active_end_time} 运行",
                 "posts_per_day": "建议测试阶段保持 0",

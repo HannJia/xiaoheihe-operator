@@ -12,6 +12,9 @@ from .models import (
     Credentials,
     DirectMessage,
     DirectMessagePage,
+    DirectConversation,
+    DirectConversationPage,
+    DirectMessageSendResult,
     LoginState,
     Notification,
     NotificationType,
@@ -751,6 +754,7 @@ def parse_direct_message_page(
     *,
     owner_uid: str,
     conversation_id: str = "",
+    peer_uid: str = "",
     page_size: int = 20,
     source: str = "",
 ) -> DirectMessagePage:
@@ -774,6 +778,7 @@ def parse_direct_message_page(
             continue
         text = str(_first(raw, "content", "text", "message", "msg", "body", default=""))
         message_id = _id(raw, "message_id", "msg_id", "messageid", "id")
+        sender_info = _first_mapping(raw, "sender_info", "sender", "from_user", "from")
         sender_uid = _id(
             raw,
             "sender_uid",
@@ -785,21 +790,27 @@ def parse_direct_message_page(
             "userid",
             "uid",
         )
+        if not sender_uid and sender_info:
+            sender_uid = _id(sender_info, "uid", "user_id", "userid", "heybox_id", "user_heybox_id")
         sender_name = str(
             _first(raw, "sender_name", "sender_nickname", "from_nickname", "nickname", "username", "name")
         )
+        if not sender_name and sender_info:
+            sender_name = str(_first(sender_info, "nickname", "username", "name", default=""))
         direction = str(_first(raw, "direction", "send_type", "type", default="")).casefold()
         outgoing_marker = direction in {"out", "outgoing", "send", "sent", "self", "1"}
         incoming = not outgoing_marker if direction else sender_uid != owner
         if sender_uid and sender_uid == owner:
             incoming = False
-        peer_uid = _id(raw, "peer_uid", "target_uid", "to_uid", "to_user_id", "friend_uid")
-        if not peer_uid and sender_uid and sender_uid != owner:
-            peer_uid = sender_uid
-        if not peer_uid:
-            peer_uid = _id(raw, "user_id", "userid", "uid")
-            if peer_uid == owner:
-                peer_uid = ""
+        item_peer_uid = _id(raw, "peer_uid", "target_uid", "to_uid", "to_user_id", "friend_uid")
+        if not item_peer_uid and sender_uid and sender_uid != owner:
+            item_peer_uid = sender_uid
+        if not item_peer_uid:
+            item_peer_uid = peer_uid
+        if not item_peer_uid:
+            item_peer_uid = _id(raw, "user_id", "userid", "uid")
+            if item_peer_uid == owner:
+                item_peer_uid = ""
         item_conversation = _id(
             raw,
             "conversation_id",
@@ -808,7 +819,7 @@ def parse_direct_message_page(
             "chat_id",
             "room_id",
         )
-        effective_conversation = item_conversation or conversation_id or (f"dm!{peer_uid}" if peer_uid else "")
+        effective_conversation = item_conversation or conversation_id or (f"dm!{item_peer_uid}" if item_peer_uid else "")
         created_at = _timestamp(
             _first(raw, "created_at", "create_time", "send_time", "timestamp", "time", default=0)
         )
@@ -838,7 +849,7 @@ def parse_direct_message_page(
                 text=text,
                 created_at=created_at,
                 incoming=incoming,
-                peer_uid=peer_uid,
+                peer_uid=item_peer_uid,
                 raw=dict(raw),
             )
         )
@@ -856,6 +867,78 @@ def parse_direct_message_page(
         next_cursor=next_cursor,
         has_more=has_more,
         source=source,
+    )
+
+
+def parse_direct_conversation_page(
+    profile_id: str,
+    payload: Mapping[str, Any],
+    *,
+    owner_uid: str,
+    page_size: int = 20,
+    source: str = "",
+) -> DirectConversationPage:
+    """Parse the private-message conversation list before reading histories."""
+
+    root: Any = payload
+    if isinstance(payload, Mapping):
+        root = payload.get("result", payload.get("data", payload))
+    raw_items = _find_conversation_list(root)
+    if raw_items is None:
+        raise ResponseShapeError("私信会话响应缺少会话列表字段")
+
+    owner = str(owner_uid or "").strip()
+    conversations: list[DirectConversation] = []
+    seen: set[str] = set()
+    for raw in raw_items:
+        if not isinstance(raw, Mapping):
+            continue
+        peer_uid, peer_name = _conversation_peer(raw, owner)
+        if not peer_uid or peer_uid == owner or peer_uid in seen:
+            continue
+        conversation_id = _id(raw, "conversation_id", "conversationid", "session_id", "chat_id", "room_id")
+        marker = _id(raw, "last_message_id", "last_msg_id", "message_id", "msg_id", "last_time", "updated_at", "update_time")
+        if not marker:
+            marker = str(_first(raw, "last_message", "message", "last_msg", default=""))[:160]
+        conversations.append(
+            DirectConversation(
+                profile_id=profile_id,
+                peer_uid=peer_uid,
+                peer_name=peer_name,
+                conversation_id=conversation_id or f"dm!{peer_uid}",
+                marker=marker,
+                raw=dict(raw),
+            )
+        )
+        seen.add(peer_uid)
+
+    meta = root if isinstance(root, Mapping) else {}
+    next_cursor = str(_first(meta, "next_cursor", "next_offset", "next_page", "cursor", default=""))
+    has_more_value = _first(meta, "has_more", "has_next", "more", default=False)
+    has_more = bool(has_more_value) and str(has_more_value).casefold() not in {"0", "false", "no"}
+    if not next_cursor and has_more:
+        next_cursor = str(max(0, len(conversations)))
+    return DirectConversationPage(
+        items=conversations,
+        next_cursor=next_cursor,
+        has_more=has_more,
+        source=source,
+    )
+
+
+def parse_direct_message_send_result(payload: Mapping[str, Any]) -> DirectMessageSendResult:
+    """Require all three server acknowledgements before marking a DM sent."""
+
+    ack = _find_first_scalar(payload, "heychat_ack_id")
+    message_id = _find_first_scalar(payload, "msg_id", "message_id", "messageid")
+    message_seq = _find_first_scalar(payload, "msg_seq", "message_seq")
+    if not ack or not message_id or not message_seq:
+        raise ResponseShapeError("私信发送响应缺少 heychat_ack_id/msg_id/msg_seq")
+    return DirectMessageSendResult(
+        heychat_ack_id=ack,
+        message_id=message_id,
+        message_seq=message_seq,
+        raw={"fields": sorted(str(key) for key in payload)[:50]},
     )
 
 
@@ -884,3 +967,75 @@ def _find_message_list(value: Any) -> list[Any] | None:
         if found is not None:
             return found
     return None
+
+
+def _find_conversation_list(value: Any) -> list[Any] | None:
+    if isinstance(value, list):
+        return value
+    if not isinstance(value, Mapping):
+        return None
+    preferred = ("messages", "list", "items", "conversations", "users", "data", "result")
+    for key in preferred:
+        candidate = value.get(key)
+        if isinstance(candidate, list):
+            return candidate
+    for key in preferred:
+        candidate = value.get(key)
+        found = _find_conversation_list(candidate)
+        if found is not None:
+            return found
+    return None
+
+
+def _first_mapping(value: Mapping[str, Any], *keys: str) -> Mapping[str, Any] | None:
+    for key in keys:
+        candidate = value.get(key)
+        if isinstance(candidate, Mapping):
+            return candidate
+    return None
+
+
+def _find_first_scalar(value: Any, *keys: str) -> str:
+    wanted = {str(key).casefold() for key in keys}
+    if isinstance(value, Mapping):
+        for key, candidate in value.items():
+            if str(key).casefold() in wanted and candidate not in (None, ""):
+                if isinstance(candidate, (str, int, float)):
+                    return str(candidate)
+        for candidate in value.values():
+            found = _find_first_scalar(candidate, *keys)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for candidate in value:
+            found = _find_first_scalar(candidate, *keys)
+            if found:
+                return found
+    return ""
+
+
+def _conversation_peer(raw: Mapping[str, Any], owner_uid: str) -> tuple[str, str]:
+    candidates: list[Mapping[str, Any]] = []
+    for key in (
+        "user_a", "user_b", "user", "recipient_info", "sender_info",
+        "from_user", "to_user", "user_info", "friend", "peer",
+    ):
+        value = raw.get(key)
+        if isinstance(value, Mapping):
+            candidates.append(value)
+        elif isinstance(value, list):
+            candidates.extend(item for item in value if isinstance(item, Mapping))
+    candidates.append(raw)
+    fallback: tuple[str, str] = ("", "")
+    for candidate in candidates:
+        uid = _id(candidate, "uid", "user_id", "userid", "heybox_id", "user_heybox_id", "sender_uid", "to_user_id", "target_user_id")
+        name = str(_first(candidate, "nickname", "username", "name", "user_name", default=""))
+        if uid and uid != owner_uid:
+            return uid, name
+        if uid and not fallback[0]:
+            fallback = (uid, name)
+    uid = _id(raw, "peer_uid", "target_uid", "to_uid", "to_user_id", "target_user_id")
+    name = str(_first(raw, "peer_name", "target_name", "to_nickname", default=""))
+    if uid and uid != owner_uid:
+        return uid, name
+    return "", ""

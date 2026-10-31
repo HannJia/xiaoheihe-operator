@@ -286,6 +286,30 @@ class OperatorStore:
         )
         self._conn.commit()
 
+    def merge_outgoing_metadata(self, action_key: str, updates: dict[str, Any]) -> None:
+        """Merge small audit markers without replacing the original request."""
+
+        if not updates:
+            return
+        row = self._conn.execute(
+            "SELECT metadata_json FROM outgoing_actions WHERE action_key=? LIMIT 1",
+            (action_key,),
+        ).fetchone()
+        if row is None:
+            return
+        try:
+            metadata = json.loads(str(row[0] or "{}"))
+        except json.JSONDecodeError:
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata.update(updates)
+        self._conn.execute(
+            "UPDATE outgoing_actions SET metadata_json=?, updated_at=? WHERE action_key=?",
+            (json.dumps(metadata, ensure_ascii=False), time.time(), action_key),
+        )
+        self._conn.commit()
+
     def count_since(self, kind: str, since: float) -> int:
         row = self._conn.execute(
             "SELECT COUNT(*) AS count FROM outgoing_actions WHERE kind=? AND created_at>=? AND status NOT IN (?, ?, ?)",
@@ -305,6 +329,7 @@ class OperatorStore:
         *,
         target_id: str | None = None,
         exclude_action_key: str = "",
+        exclude_kinds: tuple[str, ...] = (),
     ) -> float | None:
         """Return the most recent non-terminal outgoing timestamp."""
         params: list[object] = []
@@ -327,6 +352,9 @@ class OperatorStore:
         if exclude_action_key:
             clauses.append("action_key<>?")
             params.append(exclude_action_key)
+        if exclude_kinds:
+            clauses.append(f"kind NOT IN ({', '.join('?' for _ in exclude_kinds)})")
+            params.extend(exclude_kinds)
         query = (
             "SELECT updated_at FROM outgoing_actions WHERE "
             + " AND ".join(clauses)

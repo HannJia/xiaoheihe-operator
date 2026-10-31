@@ -62,6 +62,9 @@ WEB_CLIENT_PARAMS = {
     "_notip": "true",
 }
 
+# Web form writes that share the comment endpoint's v3 query contract and _rnd.
+_WEB_FORM_WRITES = frozenset({EndpointName.CREATE_COMMENT, EndpointName.POST_LIKE})
+
 
 class XiaoheiheApiError(RuntimeError):
     def __init__(
@@ -618,6 +621,18 @@ class XiaoheiheApiClient:
         except ResponseShapeError as exc:
             raise ResponseContractError(str(exc), category="response_shape") from exc
 
+    async def like_post(self, post_id: str) -> dict[str, Any]:
+        """Like a post. ``award_type=1`` sets the like, so repeating it is harmless."""
+
+        link_id = str(post_id or "").strip()
+        if not link_id:
+            raise ValueError("post_id 不能为空")
+        response = await self._request(
+            EndpointName.POST_LIKE,
+            form_body={"link_id": link_id, "award_type": "1"},
+        )
+        return dict(response.payload)
+
     async def resolve_topic_names(self, names: list[str]) -> dict[str, str]:
         """Resolve configured Chinese topic names to Xiaoheihe topic IDs.
 
@@ -680,11 +695,11 @@ class XiaoheiheApiClient:
             raise CredentialInvalidError(
                 "账号未登录", status_code=401, category="credential_invalid"
             )
-        is_comment_write = name is EndpointName.CREATE_COMMENT
-        if is_comment_write:
-            # The web comment endpoint uses its own v3 parameter contract and
-            # Cookie authentication. Do not inherit the generic heybox_id or
-            # device_id URL parameters used by read endpoints.
+        is_web_form_write = name in _WEB_FORM_WRITES
+        if is_web_form_write:
+            # Web comment and like endpoints use their own v3 parameter
+            # contract and Cookie authentication. Do not inherit the generic
+            # heybox_id or device_id URL parameters used by read endpoints.
             request_params = {
                 "app": "heybox",
                 "os_type": "web",
@@ -709,9 +724,9 @@ class XiaoheiheApiClient:
             json_body=json_body or form_body,
             signing_key=self.credentials.signing_key if self.credentials else "",
             device_id=self._device_id,
-            include_device_id=not is_comment_write,
+            include_device_id=not is_web_form_write,
         )
-        if is_comment_write:
+        if is_web_form_write:
             signed.params["_rnd"] = generate_workshop_rnd(
                 int(signed.params["_time"]), signed.params["nonce"]
             )

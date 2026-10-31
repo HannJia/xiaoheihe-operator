@@ -284,3 +284,33 @@ class DirectMessagePage:
     next_cursor: str = ""
     has_more: bool = False
     source: str = ""
+
+
+@dataclass(slots=True)
+class DirectConversation:
+    """Normalized entry from the Xiaoheihe private-message inbox."""
+
+    profile_id: str
+    peer_uid: str
+    peer_name: str = ""
+    conversation_id: str = ""
+    marker: str = ""
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class DirectConversationPage:
+    items: list[DirectConversation]
+    next_cursor: str = ""
+    has_more: bool = False
+    source: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class DirectMessageSendResult:
+    """Server acknowledgements required to treat a DM send as verified."""
+
+    heychat_ack_id: str
+    message_id: str
+    message_seq: str
+    raw: dict[str, Any] = field(default_factory=dict)

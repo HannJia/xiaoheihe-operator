@@ -140,7 +140,7 @@ def _unwrap_payload(value: object) -> object:
         if any(key in current for key in ("status", "task_id", "images", "data", "error")):
             return current
         next_value = None
-        for key in ("result", "data", "payload"):
+        for key in ("result", "data", "payload", "task"):
             candidate = current.get(key)
             if isinstance(candidate, dict):
                 next_value = candidate

@@ -29,6 +29,7 @@ class EndpointName(StrEnum):
     TOPIC_FEED = "topic_feed"
     DIRECT_MESSAGE_INBOX = "direct_message_inbox"
     DIRECT_MESSAGE_HISTORY = "direct_message_history"
+    POST_LIKE = "post_like"
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +89,9 @@ ENDPOINTS: dict[EndpointName, Endpoint] = {
     ),
     EndpointName.RECENT_COMMENTS: Endpoint("GET", "/bbs/app/comment/user", True, True),
     EndpointName.FEED: Endpoint("GET", "/bbs/app/feeds", True, True),
+    # Post like: form { link_id, award_type } with 1 = like, 0 = undo.
+    # Route and form follow dph-heybox tools/commands/like.mjs (captured 2026-10-21).
+    EndpointName.POST_LIKE: Endpoint("POST", "/bbs/app/profile/award/link", True, False),
     EndpointName.TOPIC_SELECTION_SEARCH: Endpoint(
         "GET", "/bbs/app/api/post_editor/topic_selection/search", True, True
     ),
