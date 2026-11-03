@@ -123,23 +123,27 @@ class ContentGenerator:
             return None
         return text
 
-    async def post(self, *, life_context: str, topic_hint: str = "游戏日常") -> tuple[str, str] | None:
+    async def post(self, *, life_context: str, topic_hint: str = "") -> tuple[str, str] | None:
         identity = await self._identity()
+        direction_line = (
+            f"话题方向：{normalize_text(topic_hint, 120)}\n" if topic_hint and topic_hint.strip() else ""
+        )
         prompt = [
             {
                 "role": "system",
                 "content": (
                     f"{identity}\n"
-                    "你在小黑盒发帖就像普通玩家随手记一笔：写此刻在干嘛、玩到哪、一点小情绪或小观察，"
+                    "你在小黑盒发帖就像普通用户随手记一笔：写此刻在干嘛、最近在想什么、一点小情绪或小观察，"
                     "口语、具体、有画面，不写成攻略、测评或营销文案，不用一串感叹号，结尾不要硬加提问。"
-                    "不写代码、脚本、调试、配置或服务器内容；不编造具体游戏数据、账号信息或现实经历。"
+                    "不写代码、脚本、调试、配置或服务器内容；不编造具体数据、账号信息或现实经历。"
+                    "想聊什么就聊什么，游戏、数码、生活、吃穿、感想都可以，不用限定在某个领域。"
                 ),
             },
             {
                 "role": "user",
                 "content": (
                     f"当前生活轨迹：{normalize_text(life_context, 600)}\n"
-                    f"话题方向：{normalize_text(topic_hint, 120)}\n"
+                    f"{direction_line}"
                     "请只输出 JSON：{\"title\":\"不超过28字的标题\",\"body\":\"不超过220字的正文\"}。"
                     "语气自然，像真人分享，避免营销口吻和连续提问。"
                 ),

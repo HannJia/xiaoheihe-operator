@@ -441,7 +441,7 @@ class XiaoheiheApiClient:
             "desc": "",
             "text": json.dumps(content_blocks, ensure_ascii=False),
             "post_type": "1",
-            "link_tag": "27" if any(_block_is_image(item) for item in content_blocks) else "21",
+            "link_tag": "27" if any(_block_is_image(item) for item in content_blocks) else "28",
             "draft": "1" if draft else "0",
             "view_limit": "1",
             "original": "1",
