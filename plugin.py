@@ -21,19 +21,102 @@ except ImportError:  # pragma: no cover - local loading stub
 # 这些是用户能在配置页看到的名称。插件会在发送前通过小黑盒的搜索接口
 # 解析为真实 topic_id，避免要求用户手工查找一串数字。
 COMMUNITY_OPTIONS = (
+    "AI",
+    "数码硬件",
     "Steam",
-    "PC 游戏",
+    "校园生活",
+    "百科知识",
+    "绝地求生",
     "盒友杂谈",
-    "盒友日常",
+    "沙雕日常",
+    "PC游戏",
+    "影之刃零",
+    "三角洲行动",
+    "情投一盒",
+    "原神",
+    "CS2",
+    "英雄联盟",
+    "明日方舟",
+    "深空当铺：可能是偷的",
+    "赛博朋克2077",
     "主机游戏",
+    "动漫",
+    "小说",
+    "职场工作",
+    "美食",
+    "汽车",
+    "绘画",
+    "影视",
+    "萌宠",
+    "体育运动",
+    "周边",
+    "桌游",
+    "美图自拍",
+    "Apex 英雄",
+    "战争雷霆",
+    "逃离塔科夫",
+    "无畏契约",
+    "守望先锋",
+    "星际战甲",
+    "绝地潜兵2",
+    "街头霸王6",
+    "战地风云™ 6",
+    "炉石传说",
+    "艾尔登法环 黑夜君临",
+    "刀塔2",
+    "永劫无间",
+    "暗区突围：无限（PC）",
+    "命运2",
+    "幻兽帕鲁",
+    "弧光猎人",
+    "刀塔综合区",
+    "黑神话：悟空",
+    "Switch",
+    "Gal游戏综合区",
+    "艾尔登法环",
+    "荒野大镖客：救赎2",
+    "边缘世界",
+    "怪物猎人：世界",
+    "怪物猎人：荒野",
+    "剑星",
+    "天国：拯救2",
+    "杀戮尖塔",
+    "空洞骑士：丝之歌",
+    "空洞骑士",
+    "龙之信条2",
+    "光与影：33号远征队",
+    "方舟：生存进化",
+    "猛兽派对",
+    "消逝的光芒2：坚守人性",
+    "霍格沃茨之遗",
+    "逃离鸭科夫",
+    "消逝的光芒：困兽",
     "手机游戏",
-    "游戏攻略",
-    "独立游戏",
-    "电竞赛事",
-    "优惠资讯",
+    "碧蓝档案",
+    "绝区零",
+    "崩坏：星穹铁道",
+    "王者荣耀",
+    "火影忍者",
+    "BanG Dream! 少女乐团派对!",
+    "洛克王国手游",
+    "Fate/Go",
+    "碧蓝航线",
+    "金铲铲之战",
+    "英雄联盟手游",
+    "崩坏3",
+    "少女前线",
+    "重返未来：1999",
+    "战双帕弥什",
+    "胜利女神：新的希望",
+    "使命召唤手游",
+    "尘白禁区",
+    "穿越火线-枪战王者",
+    "荒野乱斗",
+    "第五人格",
+    "恋与深空",
 )
 POST_TARGET_OPTIONS = ("",) + COMMUNITY_OPTIONS
-DEFAULT_COMMUNITY_ALLOWLIST = ("PC 游戏", "盒友杂谈")
+DEFAULT_COMMUNITY_ALLOWLIST = ("PC游戏", "盒友杂谈")
 MAX_ALLOWLIST_ITEMS = 10
 MAX_POST_TARGETS = 2
 
@@ -113,23 +196,71 @@ CommunityName = Literal[
     "电竞赛事",
     "优惠资讯",
 ]
-PostTargetName = Literal[
+# 发帖目标分为「社区」和「话题」两类，分别用独立的 Literal 下拉框。
+# 数据来自小黑盒 TOPIC_INDEX 接口，用 game.app_id 区分：
+#   app_id == -1  => 社区（版块）
+#   app_id != -1  => 具体游戏话题
+# 两个都是静态 Literal（MaiBot SDK 配置下拉框只支持静态枚举），
+# 发送前仍由 resolve_topic_names() 把名字解析成真实 topic_id。
+CommunityName = Literal[
     "",
-    "Steam",
-    "PC 游戏",
-    "盒友杂谈",
-    "盒友日常",
+    "AI",
+    "Gal游戏综合区",
+    "PC游戏",
+    "Switch",
     "主机游戏",
+    "体育运动",
+    "刀塔综合区",
+    "动漫",
+    "周边",
+    "小说",
+    "影视",
+    "情投一盒",
     "手机游戏",
-    "游戏攻略",
-    "独立游戏",
-    "电竞赛事",
-    "优惠资讯",
+    "数码硬件",
+    "校园生活",
+    "桌游",
+    "汽车",
+    "沙雕日常",
+    "百科知识",
+    "盒友杂谈",
+    "绘画",
+    "美图自拍",
+    "美食",
+    "职场工作",
+    "萌宠",
 ]
+
+HashtagName = Literal[
+    "",
+    "盒友日常",
+    "steam游戏",
+    "单机游戏",
+    "单机游戏专项创作计划",
+    "pc游戏",
+    "switch游戏",
+    "数码硬件专项创作计划",
+    "galgame推荐",
+    "战雷日常",
+    "2026最期待游戏",
+    "碧蓝档案日常分享",
+    "独立游戏",
+    "艾尔登法环日常分享",
+    "杀戮尖塔日常分享",
+    "怪物猎人世界日常分享",
+    "国产游戏",
+    "ai",
+    "肉鸽游戏",
+    "数码",
+    "恐怖游戏",
+]
+
+PostTargetName = str
 RunMode = Literal["dry_run", "auto"]
 
 try:
     from .drawpic_gateway import DrawingGateway
+    from .image_generation import DirectImageGenerator, ImageGenerationError, build_generator
     from .content_generator import ContentGenerator
     from .context_provider import PersonaContextProvider
     from .dm_store import DirectMessageStore
@@ -141,6 +272,7 @@ try:
     from .xiaoheihe_runtime import XiaoheiheRuntime
 except ImportError:  # pragma: no cover - direct Runner fallback
     from drawpic_gateway import DrawingGateway
+    from image_generation import DirectImageGenerator, ImageGenerationError, build_generator
     from content_generator import ContentGenerator
     from context_provider import PersonaContextProvider
     from dm_store import DirectMessageStore
@@ -236,13 +368,10 @@ class XiaoheiheBrowseSection(PluginConfigBase):
         placeholder="例如 23:00",
     )
     game_topic_hints: list[str] = _ui_field(
-        label="游戏筛选关键词",
-        hint="推荐流只处理命中这些关键词的游戏相关帖子；点击添加项目逐条填写。",
+        label="浏览内容关键词（可选）",
+        hint="留空则不按关键词过滤，浏览和互动范围完全由下方「社区白名单」决定。填了就只处理命中这些关键词的帖子。",
         order=4,
-        default_factory=lambda: [
-            "游戏", "steam", "switch", "ps5", "pc", "副本", "角色", "抽卡",
-            "绝区零", "原神", "崩坏", "星穹铁道", "apex", "瓦罗兰特", "单机",
-        ],
+        default_factory=list,
     )
 
 
@@ -267,7 +396,7 @@ class XiaoheiheAutomationSection(PluginConfigBase):
     )
     likes_per_day: int = _ui_field(
         label="每日点赞数",
-        hint="逛推荐流时给符合游戏筛选的帖子点赞，每天最多这么多个，同一帖子只赞一次；设为 0 表示不点赞。",
+        hint="逛推荐流时给命中浏览范围（社区白名单 + 可选关键词）的帖子点赞，每天最多这么多个，同一帖子只赞一次；设为 0 表示不点赞。",
         order=9,
         default=3,
         step=1,
@@ -310,17 +439,23 @@ class XiaoheiheAutomationSection(PluginConfigBase):
             "max_items": MAX_ALLOWLIST_ITEMS,
         },
     )
-    post_target_primary: PostTargetName = _ui_field(
-        label="发帖目标 1（社区/话题）",
-        hint="选择第一个发帖社区或话题；插件会自动解析内部 ID。留空表示不自动发帖。两个目标可以暂时选成一样，发送前会自动去重。",
+    post_target_primary: CommunityName = _ui_field(
+        label="发帖社区",
+        hint="选择要发到哪个社区（版块）。留空表示不自动发帖。",
         order=7,
-        default="Steam",
+        default="",
     )
-    post_target_secondary: PostTargetName = _ui_field(
-        label="发帖目标 2（可选）",
-        hint="可再选择一个与目标 1 不同的社区或话题；小黑盒单条帖子最多选择 2 个目标。若重复选择，发送前会自动去重。留空即可。",
+    post_target_secondary: HashtagName = _ui_field(
+        label="发帖话题标签",
+        hint="从常用 #话题标签 里选一个（可选）。想要别的标签，用下方「自定义话题标签」自由填写。留空则不挂话题。",
         order=8,
-        default="PC 游戏",
+        default="",
+    )
+    custom_hashtags: str = _ui_field(
+        label="自定义话题标签",
+        hint="自由填写额外的话题标签，多个用逗号或空格分隔（如：数码评测, 装机）。会追加到上面选的话题标签之后。留空则不追加。",
+        order=9,
+        default="",
     )
     post_topic_ids: list[str] = _ui_field(
         label="旧版发帖目标 ID（兼容字段）",
@@ -351,20 +486,41 @@ class XiaoheiheContentSection(PluginConfigBase):
     )
     generate_post_images: bool = _ui_field(
         label="自动生成帖子图片",
-        hint="可选联动「麦麦绘图」（ID：maimai-drawpic-plugin）。开启后生成帖子图片；未安装联动插件时请关闭，关闭后仍可纯文本自动发帖。",
+        hint="开启后生成帖子图片。直接用下面的「生图 API」生成（可用 MaiBot 已加载的画图模型，也可单独填中转站）；生图失败会自动降级为纯文字发帖。",
         order=1,
         default=False,
+    )
+    image_api_base_url: str = _ui_field(
+        label="生图 API 地址",
+        hint="OpenAI 兼容生图接口地址，如 https://ai.feiyuapi.top/v1。留空则尝试用 MaiBot 主配置里 api_provider 为「画图」的那个中转站。",
+        order=2,
+        default="",
+        json_schema_extra={"x-widget": "textarea"},
+    )
+    image_api_key: str = _ui_field(
+        label="生图 API Key",
+        hint="生图中转站的密钥。留空则尝试用 MaiBot 主配置里「画图」provider 的 key。",
+        order=3,
+        default="",
+        json_schema_extra={"x-widget": "textarea"},
+    )
+    image_model: str = _ui_field(
+        label="生图模型名",
+        hint="生图模型标识，如 gpt-image-2.5-flare-native。留空则尝试用 MaiBot 主配置里「画图」provider 对应的模型。",
+        order=4,
+        default="",
+        placeholder="gpt-image-2.5-flare-native",
     )
     life_context_api: str = _ui_field(
         label="生活轨迹 API",
         hint="可选联动「生活频率」（ID：org.orge-8.life-frequency）；当前完整 API 是 org.orge-8.life-frequency.get_current_context，只读调用。未安装时会自动退回当前时间和已有设定，不影响纯文本发帖。",
-        order=2,
+        order=5,
         default="org.orge-8.life-frequency.get_current_context",
     )
     identity_reference_api: str = _ui_field(
         label="身份参考图 API",
         hint="可选联动「自我身份档案」（ID：org.mai-mai.self-identity）；当前完整 API 是 org.mai-mai.self-identity.get_default_reference_image，只读调用。只在生成图片时作为参考图使用，未安装时会自动跳过。",
-        order=3,
+        order=6,
         default="org.mai-mai.self-identity.get_default_reference_image",
     )
 
@@ -530,6 +686,18 @@ class XiaoheiheConfig(PluginConfigBase):
         return self.content.generate_post_images
 
     @property
+    def image_api_base_url(self) -> str:
+        return self.content.image_api_base_url
+
+    @property
+    def image_api_key(self) -> str:
+        return self.content.image_api_key
+
+    @property
+    def image_model(self) -> str:
+        return self.content.image_model
+
+    @property
     def life_context_api(self) -> str:
         return self.content.life_context_api
 
@@ -539,14 +707,24 @@ class XiaoheiheConfig(PluginConfigBase):
 
     @property
     def post_topic_ids(self) -> list[str]:
-        selected = [
-            str(self.automation.post_target_primary or "").strip(),
-            str(self.automation.post_target_secondary or "").strip(),
-        ]
-        selected = [item for item in selected if item]
-        if selected:
-            return list(dict.fromkeys(selected))[:MAX_POST_TARGETS]
+        # 发帖分区：只用「发帖社区」，不含话题标签（标签走 hashtags）
+        primary = str(self.automation.post_target_primary or "").strip()
+        if primary:
+            return [primary]
         return list(self.automation.post_topic_ids)
+
+    @property
+    def post_hashtags(self) -> list[str]:
+        # 发帖话题标签：下拉选的常用标签 + 自定义自由填写的标签
+        tags: list[str] = []
+        selected = str(self.automation.post_target_secondary or "").strip()
+        if selected:
+            tags.append(selected)
+        custom = str(self.automation.custom_hashtags or "").strip()
+        if custom:
+            import re as _re
+            tags.extend(t.strip() for t in _re.split(r"[,，\s]+", custom) if t.strip())
+        return list(dict.fromkeys(tags))
 
     @property
     def game_topic_hints(self) -> list[str]:
@@ -594,6 +772,7 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         self._store: OperatorStore | None = None
         self._dm_store: DirectMessageStore | None = None
         self._drawing: DrawingGateway | None = None
+        self._image_gen: DirectImageGenerator | None = None
         self._runtime: XiaoheiheRuntime | None = None
         self._generator: ContentGenerator | None = None
         self._persona: PersonaContextProvider | None = None
@@ -714,6 +893,7 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         self._store = OperatorStore(data_dir / "state.db")
         self._dm_store = DirectMessageStore(data_dir / "state.db")
         self._drawing = DrawingGateway(self.ctx.api)
+        self._image_gen = self._resolve_image_generator()
         self._runtime = XiaoheiheRuntime(data_dir, self.config.profile_id)
         self._persona = PersonaContextProvider(
             self.ctx,
@@ -723,10 +903,55 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         self._generator = ContentGenerator(self.ctx.llm, persona=self._persona_identity)
         # 重启后不立刻去逛，过一会儿再打开，避免每次重启都在同一时刻出现一轮动作。
         self._next_feed_at = time.time() + self._rng.uniform(120, 900)
+        if self._image_gen is not None:
+            self.ctx.logger.info("小黑盒生图：使用直连生图 API（model=%s）", self._image_gen.model)
+        else:
+            self.ctx.logger.info("小黑盒生图：未配置直连生图 API，配图将降级为纯文字或走麦麦绘图")
         self.ctx.logger.info("小黑盒运营插件已加载：enabled=%s mode=%s", self.config.enabled, self.config.mode)
         await self._log_persona_source()
         if self.config.enabled:
             self._start_worker()
+
+    def _resolve_image_generator(self) -> DirectImageGenerator | None:
+        """解析生图参数：优先用插件配置里填的，其次从 MaiBot 主配置里找「画图」provider。"""
+
+        base = str(self.config.image_api_base_url or "").strip()
+        key = str(self.config.image_api_key or "").strip()
+        model = str(self.config.image_model or "").strip()
+        gen = build_generator(base, key, model)
+        if gen is not None:
+            return gen
+
+        # 回退：读 MaiBot 主配置 model_config.toml 里 api_provider 名为「画图」的中转站
+        try:
+            import tomllib
+            from pathlib import Path as _Path
+
+            cands = [
+                _Path(r"E:\mai\config\model_config.toml"),
+            ]
+            data_dir = getattr(getattr(self.ctx, "paths", None), "data_dir", None)
+            if data_dir:
+                cands.append(_Path(data_dir).parent.parent / "config" / "model_config.toml")
+            for config_path in cands:
+                if not config_path.exists():
+                    continue
+                cfg = tomllib.loads(config_path.read_text(encoding="utf-8"))
+                provs = {str(x.get("name")): x for x in (cfg.get("api_providers") or [])}
+                for m in (cfg.get("models") or []):
+                    if str(m.get("api_provider")) == "画图":
+                        prov = provs.get("画图") or {}
+                        base = str(prov.get("base_url") or "").rstrip("/")
+                        key = str(prov.get("api_key") or "")
+                        model = str(m.get("model_identifier") or m.get("name") or "")
+                        gen = build_generator(base, key, model)
+                        if gen is not None:
+                            return gen
+                        break
+                break
+        except Exception:
+            pass
+        return None
 
     async def _persona_identity(self) -> str:
         """生成内容用的人设：插件里单独填写的优先，否则跟随宿主 MaiBot 的昵称和人格。"""
@@ -1500,7 +1725,7 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         if remaining <= 0:
             return 0.0
         sessions_left = max(1.0, seconds_left / max(300, int(self.config.feed_interval_seconds)))
-        # 一页推荐流里通常只有一条左右符合游戏筛选，所以按每场一次机会估算。
+        # 一页推荐流里通常只有少量帖子命中浏览范围，所以按每场一次机会估算。
         return max(0.0, min(cap, remaining / sessions_left))
 
     def _feed_candidate(self, item: object) -> bool:
@@ -1551,7 +1776,7 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         return not self._is_own_feed_item(item)
 
     def _pick_posts_to_read(self, items: list[object]) -> list[dict[str, object]]:
-        """按推荐流顺序挑 2–4 篇点开：符合游戏筛选的必看，其余帖子随缘点开。"""
+        """按推荐流顺序挑 2–4 篇点开：命中浏览范围的必看，其余帖子随缘点开。"""
 
         target = self._rng.randint(2, 4)
         picked: list[dict[str, object]] = []
@@ -1713,10 +1938,11 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         else:
             life_context = await self._persona.life_context()
             first_post = self._store.count_since("proactive_post", 0) == 0
+            # 首帖给个轻松的自我介绍方向，之后不限定内容方向，由人设和生活轨迹自由发挥
             topic_hint = (
-                "第一天入驻小黑盒 Steam 社区，轻松介绍自己、说明以后想分享的游戏日常，语气自然像刚来报到"
+                "刚来小黑盒，轻松介绍一下自己，语气自然像刚来报到"
                 if first_post
-                else "游戏日常和生活观察"
+                else ""
             )
             draft = await self._generator.post(life_context=life_context, topic_hint=topic_hint)
             if not draft:
@@ -1756,26 +1982,34 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
             image_attached = False
             if self.config.generate_post_images:
                 try:
-                    stage = "draw_submit"
-                    if self._drawing is None:
-                        raise RuntimeError("绘图网关未初始化")
-                    reference = await self._persona.identity_reference()
-                    prompt = f"maibot 的小黑盒生活分享配图：{title}。{body}。保持身份参考图中的人物形象一致。"
-                    task = await self._drawing.submit(
-                        prompt,
-                        request_id=action.request_id,
-                        source_images=[reference] if reference else None,
-                    )
-                    stage = "draw_task_id"
-                    task_id = _task_id(task)
-                    if not task_id:
-                        raise RuntimeError("绘图任务未返回 task_id")
-                    stage = "draw_wait"
-                    finished = await self._drawing.wait(task_id, request_id=action.request_id)
-                    if str(finished.get("status", "")).casefold() != "completed":
-                        raise RuntimeError("绘图任务未完成")
-                    stage = "draw_read_image"
-                    image_bytes = await self._drawing.read_image(task_id)
+                    image_bytes: bytes | None = None
+                    # 优先：直连生图 API（自己的中转站或 MaiBot 已加载的画图模型）
+                    if self._image_gen is not None:
+                        stage = "direct_image"
+                        prompt = f"maibot 的小黑盒生活分享配图：{title}。{body}。"
+                        image_bytes = await self._image_gen.generate(prompt)
+                    # 回退：麦麦绘图插件
+                    if image_bytes is None and self._drawing is not None:
+                        stage = "draw_submit"
+                        reference = await self._persona.identity_reference()
+                        prompt = f"maibot 的小黑盒生活分享配图：{title}。{body}。保持身份参考图中的人物形象一致。"
+                        task = await self._drawing.submit(
+                            prompt,
+                            request_id=action.request_id,
+                            source_images=[reference] if reference else None,
+                        )
+                        stage = "draw_task_id"
+                        task_id = _task_id(task)
+                        if not task_id:
+                            raise RuntimeError("绘图任务未返回 task_id")
+                        stage = "draw_wait"
+                        finished = await self._drawing.wait(task_id, request_id=action.request_id)
+                        if str(finished.get("status", "")).casefold() != "completed":
+                            raise RuntimeError("绘图任务未完成")
+                        stage = "draw_read_image"
+                        image_bytes = await self._drawing.read_image(task_id)
+                    if image_bytes is None:
+                        raise RuntimeError("没有可用的生图方式")
                     stage = "upload_image"
                     uploaded = await client.upload_image_bytes(image_bytes, filename=f"{fingerprint}.png")
                     blocks.append(
@@ -1813,7 +2047,7 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
                 title=title,
                 content_blocks=blocks,
                 topic_ids=topic_id_value,
-                hashtags=["游戏日常", "maibot"],
+                hashtags=self.post_hashtags,
             )
             link_id = str(result.get("link_id") or "")
             if not link_id:
@@ -1904,7 +2138,7 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
             "settings_help": {
                 "mode": "dry_run 只记录计划；auto 才会真实发送",
                 "feed_interval_seconds": "两次逛推荐流的平均间隔，实际在 0.5–1.5 倍之间随机；推荐 600 秒。每次点开 2–4 篇，多数只看不评",
-                "likes_per_day": "每天最多点赞数；只赞符合游戏筛选的帖子，同一帖子只赞一次",
+                "likes_per_day": "每天最多点赞数；只赞命中浏览范围的帖子，同一帖子只赞一次",
                 "feed_active_window": f"AI 浏览和主动评论只在服务器本地时间 {self.config.feed_active_start_time}-{self.config.feed_active_end_time} 运行；与发帖时间窗口独立",
                 "post_active_window": f"主动发帖和发送前失败重试只在服务器本地时间 {self.config.post_active_start_time}-{self.config.post_active_end_time} 运行",
                 "posts_per_day": "建议测试阶段保持 0",

@@ -73,6 +73,12 @@ class PersonaContextProvider:
                     return self._life_cache
             except Exception as exc:  # noqa: BLE001
                 self.ctx.logger.debug("生活轨迹 API 暂不可用：%s", type(exc).__name__)
+        # 回退：直接读「生活频率」插件的状态文件（org.orge-8.life-frequency / life_state.json）
+        text = _read_life_state_file(self.ctx)
+        if text:
+            self._life_cache = normalize_text(text, 600)
+            self._life_cache_at = now
+            return self._life_cache
         return "当前时间为" + time.strftime("%H:%M") + "，请只依据已有设定自然表达。"
 
     async def identity_reference(self) -> bytes | None:
@@ -108,6 +114,68 @@ def _extract_context_text(value: Any) -> str:
                 nested = _extract_context_text(value[key])
                 if nested:
                     return nested
+    return ""
+
+
+_ACTIVITY_LABELS = {
+    "sleep": "睡觉",
+    "nap": "小睡",
+    "daze": "刚醒赖床",
+    "study": "学习",
+    "work": "工作",
+    "game": "玩游戏",
+    "watch": "看番",
+    "music": "听歌",
+    "meal": "吃饭",
+    "daily": "日常",
+    "commute": "通勤",
+    "rest": "休息",
+}
+
+
+def _read_life_state_file(ctx: Any) -> str:
+    """回退通道：读「生活频率」插件（org.orge-8.life-frequency）的 life_state.json。
+
+    生活频率最新版没有 get_current_context 这个 API，但会把状态写到
+    data/plugins/org.orge-8.life-frequency/life_state.json。这里直接读文件，
+    把 activity / scene / emotion / energy 拼成一句「当前生活轨迹」文本。
+    """
+
+    try:
+        import json as _json
+        from pathlib import Path as _Path
+
+        data_dir = getattr(getattr(ctx, "paths", None), "data_dir", None)
+        if not data_dir:
+            return ""
+        candidates = [
+            _Path(data_dir) / "org.orge-8.life-frequency" / "life_state.json",
+            _Path(str(data_dir)).parent / "plugins" / "org.orge-8.life-frequency" / "life_state.json",
+        ]
+        for path in candidates:
+            if not path.exists():
+                continue
+            try:
+                state = _json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(state, dict):
+                continue
+            activity = str(state.get("activity") or "").strip()
+            scene = str(state.get("scene") or "").strip()
+            emotion = state.get("emotion")
+            energy = state.get("energy")
+            label = _ACTIVITY_LABELS.get(activity.lower(), activity or "日常")
+            parts = [f"当前活动：{label}"]
+            if scene:
+                parts[-1] += f"（{scene}）"
+            if isinstance(emotion, (int, float)):
+                parts.append(f"情绪 {emotion:.1f}/10")
+            if isinstance(energy, (int, float)):
+                parts.append(f"体力 {energy:.1f}/10")
+            return "，".join(parts)
+    except Exception:
+        return ""
     return ""
 
 
