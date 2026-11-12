@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.8.0 - 2026-11-13
+
+- Daily news now defaults to 08:00 server time. Generation does not follow simulated sleep unless `respect_sleep` is enabled. The deadline limits generation retries, while delivered drafts can be approved until the end of the same day.
+- In news `auto` mode, persist the exact verified text, image, destination and hashtags, send the complete preview privately, and wait for the configured owner's QQ private message `可以发送`. `取消发送` cancels the draft. Other users, groups, older confirmations, undelivered previews and next-day drafts cannot authorize a post.
+- Approval survives restarts. Repeated confirmations cannot duplicate posts; image upload failures keep the draft pending instead of silently changing an approved image post into text. A fresh confirmation is required after preparation fails. The publish boundary checks approval and the exact saved payload before uploading and again before sending.
+- Includes the 0.6–0.7 news improvements: original-source and first-publication checks, independent semantic review with verbatim evidence, metric/condition/availability checks, short-comment review, event deduplication, bounded review batches, and a sealed final body. Missing evidence or review results cannot enter publication.
+- News images are deterministic Chinese infographics with verified text, source photos or labelled excerpts. Optional normal daily posts have an independent `daily_posts_enabled` switch; life-image prompts no longer hard-code an account label or request a social-feed screenshot.
+- Updated website comment signing to the current v16 AES-GCM contract and request parameters; a gateway 403 no longer deletes otherwise valid credentials.
+- Declared httpx, cryptography and Pillow package dependencies. News remains disabled and `dry_run` on new installs; the owner's ID and runtime configuration are never shipped.
+
+## 0.6.0 - 2026-11-06
+
+- Added an opt-in daily AI news post (`[news]`, off by default). From `post_time` (09:00) it searches with the host's unified web service, filters candidates (no date, older than 36 hours, blocked keywords, used in the last 3 days, more than 2 per site), lets the model pick 3–5 items, reads the source pages and writes a digest with a short opinion. Numbers and English words in each fact must appear in its source; lines that fail the check, claim first-hand use, reveal an AI identity or contain links are removed. The post lists source names only; links go to the owner in a private message.
+- The news illustration uses the drawing plugin without the identity reference image; a failed drawing is retried once with a new request id, then the post goes out as text only.
+- `dry_run` sends the draft and image to the owner without uploading or posting. `auto` requires both `[basic] mode` and `[news] mode` to be `auto`; the post request is sent at most once and is never repeated after it starts. Pre-send failures retry up to 3 times at least 10 minutes apart; at `deadline_time` (11:00) the day is given up and the owner is told why.
+- Added the operator command `/xhh_news_preview`, which builds a draft immediately and sends it to the owner without writing a record or posting.
+- Added `[basic] owner_qq` for private notifications (lost login, news drafts and results). Declared `web.search`, `web.fetch`, `chat.get_stream_by_user_id`, `send.text` and `send.image`.
+- Replies to comments now answer the comment first; the post body is only background, so a "thanks" or "I like you" is no longer answered with the post topic.
+- Text-only posts now use `link_tag` 27. The previous value 21 was rejected as a wrong post section, so the text fallback after a failed image never went out.
+- Readback of unconfirmed sends is limited to the last 48 hours and runs every 10 minutes instead of every poll.
+- The news self-disclosure check now also catches "我是 AI" with a space and no longer flags "作为程序员".
+
 ## 0.5.0 - 2026-11-01
 
 - Persona now follows the host MaiBot by default: comments, replies and posts use `bot.nickname` and `personality.personality` (the same identity the host replyer uses), re-read at most once a minute so WebUI persona edits and profile switches take effect without a restart. The previous hard-coded studio persona has been removed.

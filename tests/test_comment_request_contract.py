@@ -8,7 +8,10 @@ from vendor_xiaoheihe.api_client import API_BASE_URL, SendUncertainError, Xiaohe
 from vendor_xiaoheihe.endpoints import EndpointName, endpoint
 from vendor_xiaoheihe.http_compat import NetworkError
 from vendor_xiaoheihe.models import Credentials, RoutingTarget
-from vendor_xiaoheihe.request_signing import generate_hkey, generate_workshop_rnd
+from vendor_xiaoheihe.request_signing import generate_hkey, generate_workshop_rnd, generate_web_rnd16
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+import base64
+import json
 
 
 class _Cookies:
@@ -116,23 +119,49 @@ class CommentRequestContractTests(unittest.TestCase):
             "app": "heybox",
             "os_type": "web",
             "x_app": "heybox_website",
-            "x_client_type": "web",
+            "x_client_type": "weboutapp",
             "x_os_type": "Windows",
-            "x_client_version": "",
-            "client_type": "web",
             "web_version": "3.0",
             "version": "999.0.4",
         }
         assert {key: params[key] for key in expected_base} == expected_base
-        assert "heybox_id" not in params
-        assert "device_id" not in params
+        assert params["heybox_id"] == "fixture-user-id"
+        assert params["device_id"]
         assert params["hkey"] == generate_hkey(
             "/bbs/app/comment/create", int(params["_time"]), params["nonce"]
         )
-        assert params["_rnd"] == generate_workshop_rnd(
-            int(params["_time"]), params["nonce"]
+        assert params["_rnd"].startswith("16:")
+        raw = base64.urlsafe_b64decode(params["_rnd"][3:] + "===")
+        decoded = AESGCM(base64.b64decode("HFFSTsqmvG3uGxPNXDQW+1VARfqgG4nT6LS1PX7F8NQ=")).decrypt(
+            raw[:12], raw[12:], b"heybox-rnd:v16"
         )
+        assert json.loads(decoded) == [params["_time"], params["nonce"], "/bbs/app/comment/create/"]
         await client.close()
+
+    def test_rnd16_matches_official_webcrypto_vector(self):
+        self.assertEqual(
+            generate_web_rnd16(1780000000, "0123456789ABCDEF0123456789ABCDEF", "/bbs/app/comment/create", iv=bytes(12)),
+            "16:AAAAAAAAAAAAAAAAVlN0UbTYlVieEahJ7DF4_g8e6NO6QBueggbGwoFKj5NGnBSFyTyhSdYy2isCQhgl-0646MvumLxa64BYzD4LnBJBuLHZd50R8xchY1LenxUH-mUhkh9kqB19PJ8",
+        )
+
+    def test_gateway_403_preserves_credentials_but_401_invalidates(self):
+        async def scenario(status):
+            transport = _RecordingClient()
+            async def request(*args, **kwargs):
+                res = _Response({"status":"failed"})
+                res.status_code = status
+                return res
+            transport.request = request
+            invalid = []
+            async def callback(profile, code): invalid.append(code)
+            client = _make_client(transport)
+            client._on_auth_invalid = callback
+            with self.assertRaises(Exception):
+                await client.check_credentials()
+            await client.close()
+            return invalid
+        self.assertEqual(asyncio.run(scenario(403)), [])
+        self.assertEqual(asyncio.run(scenario(401)), [401])
 
     def test_comment_write_timeout_is_uncertain_and_never_retried(self):
         asyncio.run(self._assert_timeout_is_uncertain())

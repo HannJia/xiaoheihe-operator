@@ -8,6 +8,11 @@ The upstream license text is kept in `LICENSE`.
 
 Additional references:
 
+- Current comment request compatibility was independently implemented from the
+  public Xiaoheihe website's Uq/PW/aSe/Lke behavior (index-C10NdQWW.js,
+  2026-11-12). No website bundle is redistributed. The RND16 constant is a public
+  protocol value, not an account secret. Attributed news photos/excerpts remain
+  the property of their source publishers.
 - `AaronZ345/xiaoheihe-cli` is an interface and behavior reference for the
   comment dry-run/readback boundary and Xiaoheihe web post `img` block. Its
   code is not bundled here.

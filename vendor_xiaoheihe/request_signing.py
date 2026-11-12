@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import re
 import secrets
 import time
 from dataclasses import dataclass
@@ -173,3 +174,26 @@ def generate_workshop_rnd(timestamp: int, nonce: str) -> str:
         _WORKSHOP_RND_KEY.encode("utf-8"), message, hashlib.sha256
     ).hexdigest()
     return f"{_WORKSHOP_RND_VERSION}:{signature}"
+
+
+def generate_web_rnd16(timestamp: int, nonce: str, path: str, *, iv: bytes | None = None) -> str:
+    """Current official website contract (index-C10NdQWW.js, 2026-11-12).
+
+    This is the published client protocol constant, not an account credential.
+    The path in both hkey and RND16 must have a trailing slash.
+    """
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    import json
+    import os
+    canonical = path if path.endswith("/") else path + "/"
+    if (not isinstance(timestamp, int) or isinstance(timestamp, bool) or not 0 <= timestamp <= 2**53 - 1
+            or not re.fullmatch(r"[0-9A-F]{32}", nonce)
+            or not canonical.startswith("/") or re.search(r"[\s?#\\]|[^\x21-\x7e]", canonical)):
+        raise ValueError("invalid RND16 request parameters")
+    iv = os.urandom(12) if iv is None else iv
+    if len(iv) != 12:
+        raise ValueError("RND16 IV must be 12 bytes")
+    key = base64.b64decode("HFFSTsqmvG3uGxPNXDQW+1VARfqgG4nT6LS1PX7F8NQ=")
+    message = json.dumps([str(timestamp), nonce, canonical], separators=(",", ":")).encode("ascii")
+    encrypted = AESGCM(key).encrypt(iv, message, b"heybox-rnd:v16")
+    return "16:" + base64.urlsafe_b64encode(iv + encrypted).decode("ascii").rstrip("=")

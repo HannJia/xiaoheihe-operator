@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import random
 import re
@@ -36,6 +37,15 @@ POST_TARGET_OPTIONS = ("",) + COMMUNITY_OPTIONS
 DEFAULT_COMMUNITY_ALLOWLIST = ("PC 游戏", "盒友杂谈")
 MAX_ALLOWLIST_ITEMS = 10
 MAX_POST_TARGETS = 2
+# 每日 AI 早报：发帖前失败最多试几次、两次之间至少隔多久。
+NEWS_MAX_ATTEMPTS = 3
+NEWS_RETRY_GAP_SECONDS = 600
+# “结果未知”的发送只读回核对 48 小时，每 10 分钟一轮，旧记录不再反复请求小黑盒。
+RECONCILE_INTERVAL_SECONDS = 600
+RECONCILE_MAX_AGE_SECONDS = 48 * 3600
+LOGIN_LOST_NOTIFY_SECONDS = 12 * 3600
+# 发帖请求被小黑盒明确拒绝的错误类别；其余发出后的错误一律按“结果未知”处理，不重发。
+NEWS_REJECTED_CATEGORIES = {"upstream_rejected", "credential_invalid", "forbidden", "rate_limited", "http"}
 
 
 def _hhmm_to_minutes(value: object) -> int | None:
@@ -129,23 +139,29 @@ PostTargetName = Literal[
 RunMode = Literal["dry_run", "auto"]
 
 try:
+    from . import daily_news, news_image, news_sources, news_verification, news_approval
     from .drawpic_gateway import DrawingGateway
-    from .content_generator import ContentGenerator
+    from .content_generator import ContentGenerator, post_image_prompt
     from .context_provider import PersonaContextProvider
     from .dm_store import DirectMessageStore
     from .models import IncomingEvent, OutgoingAction, OutgoingStatus
-    from .policy import content_fingerprint, is_publishable, normalize_text
+    from .policy import content_fingerprint, is_news_publishable, is_publishable, normalize_text
     from .qr_generator import qr_data_url
     from .store import OperatorStore
     from .vendor_xiaoheihe.models import Notification, NotificationType, RoutingTarget
     from .xiaoheihe_runtime import XiaoheiheRuntime
 except ImportError:  # pragma: no cover - direct Runner fallback
+    import daily_news
+    import news_image
+    import news_sources
+    import news_verification
+    import news_approval
     from drawpic_gateway import DrawingGateway
-    from content_generator import ContentGenerator
+    from content_generator import ContentGenerator, post_image_prompt
     from context_provider import PersonaContextProvider
     from dm_store import DirectMessageStore
     from models import IncomingEvent, OutgoingAction, OutgoingStatus
-    from policy import content_fingerprint, is_publishable, normalize_text
+    from policy import content_fingerprint, is_news_publishable, is_publishable, normalize_text
     from qr_generator import qr_data_url
     from store import OperatorStore
     from vendor_xiaoheihe.models import Notification, NotificationType, RoutingTarget
@@ -200,6 +216,13 @@ class XiaoheiheBasicSection(PluginConfigBase):
         default="auto",
         placeholder="请选择 dry_run 或 auto",
     )
+    owner_qq: str = _ui_field(
+        label="老板 QQ（私聊提醒）",
+        hint="填写后，小黑盒掉登录、每日 AI 早报的草稿和发帖结果会私聊这个 QQ；留空不发。",
+        order=3,
+        default="",
+        placeholder="例如 123456789",
+    )
 
 
 class XiaoheiheBrowseSection(PluginConfigBase):
@@ -251,10 +274,16 @@ class XiaoheiheAutomationSection(PluginConfigBase):
     __ui_icon__ = "send"
     __ui_order__ = 3
 
+    daily_posts_enabled: bool = _ui_field(
+        label="启用日常发帖",
+        hint="控制生活/游戏日常帖及其失败重试；关闭后不生成、不配图、不发布日常帖。AI 早报、浏览、点赞和评论分别按各自设置运行。",
+        order=0,
+        default=True,
+    )
     posts_per_day: int = _ui_field(
         label="每日主动发帖数",
         hint="每天最多主动发布的帖子数量；发布版默认 1。设为 0 表示关闭自动发帖。",
-        order=0,
+        order=1,
         default=1,
         step=1,
     )
@@ -369,10 +398,87 @@ class XiaoheiheContentSection(PluginConfigBase):
     )
 
 
+class XiaoheiheNewsSection(PluginConfigBase):
+    """每日 AI 早报：核查资讯，排版为包含文字和来源照片的一图流。"""
+
+    __ui_label__ = "每日 AI 早报"
+    __ui_icon__ = "newspaper"
+    __ui_order__ = 5
+
+    enabled: bool = _ui_field(
+        label="启用每日 AI 早报",
+        hint="默认关闭。需要 MaiBot 已配置统一联网服务（模型配置里的 web_search 任务），否则搜索会失败。",
+        order=0,
+        default=False,
+    )
+    mode: RunMode = _ui_field(
+        label="早报运行模式",
+        hint="dry_run 只私聊预览；auto 先私聊待确认稿，老板当天在 QQ 私聊回复“可以发送”才发小黑盒。基础设置也必须为 auto。未确认绝不发送，次日旧稿失效。",
+        order=1,
+        default="dry_run",
+    )
+    post_time: str = _ui_field(
+        label="开始时间",
+        hint="服务器本地时间 HH:MM。到点开始搜索、写稿、核查并私聊审核；实际发布时间以老板确认时间为准。",
+        order=2,
+        default="08:00",
+        placeholder="例如 08:00",
+    )
+    deadline_time: str = _ui_field(
+        label="截止时间",
+        hint="服务器本地时间 HH:MM，必须晚于开始时间。仅限制生成重试；已经私聊的待确认稿可在当天确认发送。",
+        order=3,
+        default="11:00",
+        placeholder="例如 11:00",
+    )
+    queries: list[str] = _ui_field(
+        label="搜索词",
+        hint="每条单独搜索，{date} 会换成当天日期（如 11月5日），{yesterday} 换成前一天。DeepSeek 搜索每条最长 128 字。",
+        order=4,
+        default_factory=lambda: list(daily_news.DEFAULT_QUERIES),
+    )
+    post_target: CommunityName = _ui_field(
+        label="发帖分区",
+        hint="早报发到哪个社区或话题；插件会在发送前解析内部 ID。解析不到时当天放弃并私聊老板。",
+        order=5,
+        default="盒友杂谈",
+    )
+    hashtags: list[str] = _ui_field(
+        label="帖子标签",
+        hint="早报帖子带的话题标签，点击添加项目逐条填写；留空不带标签。",
+        order=6,
+        default_factory=lambda: ["AI资讯"],
+    )
+    generate_image: bool = _ui_field(
+        label="生成配图",
+        hint="把核查后的当期资讯、来源和简评排成一张长图。中文由本地字体排版，和正文一致。失败时发纯文字。",
+        order=7,
+        default=True,
+    )
+    source_photos: bool = _ui_field(
+        label="使用报道配图",
+        hint="尝试读取公开原文的报道照片并标注来源；没有合适照片时用带出处的原文摘录卡。不会截取登录内容。",
+        order=9,
+        default=True,
+    )
+    respect_sleep: bool = _ui_field(
+        label="生成早报时跟随睡眠状态",
+        hint="默认关闭，到点就生成并私聊审核；开启后睡觉和小睡会推迟生成。普通逛帖和生活发帖仍遵循作息。",
+        order=10,
+        default=False,
+    )
+    blocked_keywords: list[str] = _ui_field(
+        label="屏蔽词",
+        hint="标题或摘要含这些词的新闻不选，写出来的句子含这些词也会删掉。点击添加项目逐条填写。",
+        order=8,
+        default_factory=lambda: list(daily_news.DEFAULT_BLOCKED_KEYWORDS),
+    )
+
+
 class XiaoheiheDirectMessageSection(PluginConfigBase):
     __ui_label__ = "私信兼容设置"
     __ui_icon__ = "message-circle"
-    __ui_order__ = 5
+    __ui_order__ = 6
 
     dm_enabled: bool = _ui_field(
         label="启用私信功能",
@@ -431,6 +537,7 @@ class XiaoheiheConfig(PluginConfigBase):
     browse: XiaoheiheBrowseSection = Field(default_factory=XiaoheiheBrowseSection)
     automation: XiaoheiheAutomationSection = Field(default_factory=XiaoheiheAutomationSection)
     content: XiaoheiheContentSection = Field(default_factory=XiaoheiheContentSection)
+    news: XiaoheiheNewsSection = Field(default_factory=XiaoheiheNewsSection)
     dm: XiaoheiheDirectMessageSection = Field(default_factory=XiaoheiheDirectMessageSection)
 
     @property
@@ -460,6 +567,10 @@ class XiaoheiheConfig(PluginConfigBase):
     @property
     def feed_active_end_time(self) -> str:
         return self.browse.feed_active_end_time
+
+    @property
+    def daily_posts_enabled(self) -> bool:
+        return self.automation.daily_posts_enabled
 
     @property
     def posts_per_day(self) -> int:
@@ -603,6 +714,16 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         self._rng = random.Random()
         self._last_dm_poll_at = 0.0
         self._topic_id_cache: dict[str, str] = {}
+        self._next_reconcile_at = 0.0
+        self._news_lock = asyncio.Lock()
+        self._news_preview_task: asyncio.Task[None] | None = None
+        self._news_approval_task: asyncio.Task[None] | None = None
+        self._news_skip: tuple[str, str] = ("", "")
+        self._news_window_seen = ""
+        self._news_notified: set[str] = set()
+        self._news_bad_time_warned = False
+        self._had_credentials = False
+        self._login_lost_notified_at = 0.0
 
     @staticmethod
     def _sanitize_config(config: Any) -> Any:
@@ -715,6 +836,7 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         self._dm_store = DirectMessageStore(data_dir / "state.db")
         self._drawing = DrawingGateway(self.ctx.api)
         self._runtime = XiaoheiheRuntime(data_dir, self.config.profile_id)
+        self._had_credentials = self._runtime.credentials is not None
         self._persona = PersonaContextProvider(
             self.ctx,
             life_api_name=str(self.config.life_context_api),
@@ -754,6 +876,18 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
 
     async def on_unload(self) -> None:
         self._stop.set()
+        if self._news_approval_task is not None and not self._news_approval_task.done():
+            self._news_approval_task.cancel()
+            try:
+                await self._news_approval_task
+            except asyncio.CancelledError:
+                pass
+        if self._news_preview_task is not None and not self._news_preview_task.done():
+            self._news_preview_task.cancel()
+            try:
+                await self._news_preview_task
+            except asyncio.CancelledError:
+                pass
         if self._worker is not None:
             self._worker.cancel()
             try:
@@ -790,6 +924,14 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
                 raise
             except Exception as exc:  # noqa: BLE001
                 self.ctx.logger.error("小黑盒运营轮询失败：%s", exc)
+            # 早报单独一步：小黑盒通知接口报错或掉登录时，草稿照样能生成并私聊老板。
+            try:
+                await self._check_login_lost()
+                await self._maybe_daily_news()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                self.ctx.logger.error("每日 AI 早报处理失败：%s", _error_label(exc))
             await asyncio.sleep(max(30, int(self.config.poll_interval_seconds)))
 
     async def _poll_once(self) -> None:
@@ -806,7 +948,9 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         )
         if post_window_active:
             await self._retry_pre_send_proactive_posts(client)
-        await self._reconcile_unknowns(client)
+        if time.time() >= self._next_reconcile_at:
+            self._next_reconcile_at = time.time() + RECONCILE_INTERVAL_SECONDS
+            await self._reconcile_unknowns(client)
         await self._retry_cooldown_comments(client)
         for event_type in (NotificationType.MENTION, NotificationType.REPLY):
             await self._poll_notifications(client, event_type)
@@ -1409,8 +1553,9 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         if self._store is None:
             return
         rows: list[dict[str, object]] = []
+        since = time.time() - RECONCILE_MAX_AGE_SECONDS
         for status in (OutgoingStatus.SENDING, OutgoingStatus.SEND_UNKNOWN):
-            rows.extend(self._store.list_outgoing(status=status, limit=30))
+            rows.extend(self._store.list_outgoing(status=status, since=since, limit=30))
         for row in rows:
             metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
             try:
@@ -1426,7 +1571,7 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
                 elif row.get("kind") == "post_like":
                     # 点赞中途重启：点赞可安全重做，记 failed 让以后的浏览重新判断。
                     self._store.update_outgoing(row["action_key"], OutgoingStatus.FAILED, error="interrupted")
-                elif row.get("kind") == "proactive_post":
+                elif row.get("kind") in {"proactive_post", "news_post"}:
                     link_id = str(
                         metadata.get("link_id")
                         or row.get("target_id")
@@ -1469,7 +1614,7 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         if await self._persona_asleep():
             self.ctx.logger.info("小黑盒本次不逛：生活状态显示她在睡觉或小睡")
             return
-        if post_window_active and self._within_quota("proactive_post", int(self.config.posts_per_day)):
+        if getattr(self.config, "daily_posts_enabled", True) and post_window_active and self._within_quota("proactive_post", int(self.config.posts_per_day)):
             await self._create_proactive_post(client)
         if browse_window_active:
             await self._browse_session(client)
@@ -1667,6 +1812,8 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
         return True
 
     async def _create_proactive_post(self, client) -> None:
+        if not getattr(self.config, "daily_posts_enabled", True):
+            return
         if self._store is None or self._generator is None or self._persona is None:
             return
         if not _time_window_active(
@@ -1760,7 +1907,13 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
                     if self._drawing is None:
                         raise RuntimeError("绘图网关未初始化")
                     reference = await self._persona.identity_reference()
-                    prompt = f"maibot 的小黑盒生活分享配图：{title}。{body}。保持身份参考图中的人物形象一致。"
+                    nickname = ""
+                    try:
+                        raw = await self.ctx.config.get("bot.nickname", "")
+                        nickname = normalize_text(raw if isinstance(raw, str) else "", 40)
+                    except Exception:  # SDK/config unavailable: do not invent a software account name.
+                        pass
+                    prompt = post_image_prompt(title, body, nickname)
                     task = await self._drawing.submit(
                         prompt,
                         request_id=action.request_id,
@@ -1776,6 +1929,9 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
                         raise RuntimeError("绘图任务未完成")
                     stage = "draw_read_image"
                     image_bytes = await self._drawing.read_image(task_id)
+                    if not getattr(self.config, "daily_posts_enabled", True):
+                        self._store.update_outgoing(action_key, OutgoingStatus.SUPPRESSED, error="daily_posts_disabled")
+                        return
                     stage = "upload_image"
                     uploaded = await client.upload_image_bytes(image_bytes, filename=f"{fingerprint}.png")
                     blocks.append(
@@ -1807,13 +1963,16 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
                         type(exc).__name__,
                     )
 
+            if not getattr(self.config, "daily_posts_enabled", True):
+                self._store.update_outgoing(action_key, OutgoingStatus.SUPPRESSED, error="daily_posts_disabled")
+                return
             stage = "create_post"
             external_send_started = True
             result = await client.create_post(
                 title=title,
                 content_blocks=blocks,
                 topic_ids=topic_id_value,
-                hashtags=["游戏日常", "maibot"],
+                hashtags=["游戏日常"],
             )
             link_id = str(result.get("link_id") or "")
             if not link_id:
@@ -1862,7 +2021,7 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
     async def _retry_pre_send_proactive_posts(self, client) -> None:
         """Retry an action only when no external post request was started."""
 
-        if self._store is None or not _time_window_active(
+        if not getattr(self.config, "daily_posts_enabled", True) or self._store is None or not _time_window_active(
             self.config.post_active_start_time,
             self.config.post_active_end_time,
         ):
@@ -1875,6 +2034,650 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
             for row in rows
         ):
             await self._create_proactive_post(client)
+
+    # ---- 掉登录提醒与私聊老板 ----
+
+    async def _check_login_lost(self) -> None:
+        """凭证从有变成没有时私聊老板一次：插件遇到 401/403 会删凭证，之后就停在原地。"""
+
+        has_credentials = bool(self._runtime and self._runtime.credentials)
+        lost = self._had_credentials and not has_credentials
+        self._had_credentials = has_credentials
+        if not lost or time.time() - self._login_lost_notified_at < LOGIN_LOST_NOTIFY_SECONDS:
+            return
+        self.ctx.logger.warning("小黑盒登录已失效，自动运营暂停，等重新扫码")
+        if await self._notify_owner("小黑盒登录失效了，逛帖、回复和发帖都已暂停。请在控制面板“小黑盒运营”重新扫码。"):
+            self._login_lost_notified_at = time.time()
+
+    async def _notify_owner(self, text: str, image: bytes | None = None) -> bool:
+        """私聊老板；没填 owner_qq、找不到私聊或发送失败时只记日志。"""
+
+        owner = str(self.config.basic.owner_qq or "").strip()
+        if not owner:
+            return False
+        try:
+            stream = await self.ctx.chat.get_stream_by_user_id(owner, platform="qq")
+            stream_id = _stream_id_of(stream)
+            if not stream_id:
+                self.ctx.logger.warning("找不到老板的私聊会话，提醒没发出去")
+                return False
+            sent = await self.ctx.send.text(f"（小黑盒）{text}", stream_id)
+            if sent is False:
+                self.ctx.logger.warning("私聊老板失败：发送未确认")
+                return False
+            if image:
+                if await self.ctx.send.image(base64.b64encode(image).decode("ascii"), stream_id) is False:
+                    return False
+        except Exception as exc:  # noqa: BLE001
+            self.ctx.logger.warning("私聊老板失败：%s", type(exc).__name__)
+            return False
+        return True
+
+    # ---- 每日 AI 早报：调度与状态机 ----
+
+    def _news_mode(self) -> str:
+        """早报和全局运行模式取更保守的：两边都是 auto 才真发。"""
+
+        both_auto = str(self.config.basic.mode).lower() == "auto" and str(self.config.news.mode).lower() == "auto"
+        return "auto" if both_auto else "dry_run"
+
+    async def _maybe_daily_news(self, now: float | None = None) -> None:
+        if not self.config.news.enabled or self._store is None:
+            return
+        start = _hhmm_to_minutes(self.config.news.post_time)
+        deadline = _hhmm_to_minutes(self.config.news.deadline_time)
+        if start is None or deadline is None or start >= deadline:
+            if not self._news_bad_time_warned:
+                self._news_bad_time_warned = True
+                self.ctx.logger.warning("每日 AI 早报时间配置无效：开始时间要早于截止时间，格式 HH:MM")
+            return
+        self._news_bad_time_warned = False
+        current = time.time() if now is None else now
+        local = time.localtime(current)
+        minute = local.tm_hour * 60 + local.tm_min
+        if minute < start or self._news_lock.locked():
+            return
+        async with self._news_lock:
+            await self._news_step(time.strftime("%Y-%m-%d", local), current, minute >= deadline, deadline)
+
+    async def _news_step(self, day: str, now: float, past_deadline: bool, deadline: int) -> None:
+        assert self._store is not None
+        key = f"news:{day}"
+        row = self._store.get_outgoing(key)
+        if row is None:
+            if past_deadline:
+                if self._news_window_seen == day:
+                    await self._finalize_news(key, "missed_window", skip_reason=self._news_skip_reason(day))
+                return
+            self._news_window_seen = day
+            if await self._news_blocker(day, key):
+                return
+            mode = self._news_mode()
+            action = OutgoingAction(key, "news_post", "", "", metadata={"attempts": 1, "mode": mode})
+            if self._store.begin_outgoing(action):
+                await self._run_news_attempt(key, day, now, mode, 1)
+            return
+        status = str(row.get("status") or "")
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        if status == OutgoingStatus.AWAITING_APPROVAL.value:
+            approval = metadata.get("approval") or {}
+            if approval.get("approved_at"):
+                approval["approved_at"] = 0
+                self._store.merge_outgoing_metadata(key, {"approval": approval})
+            # Delivery may have been interrupted; repeat only the same private preview, never publish.
+            if not approval.get("delivered_at") and now >= float(approval.get("notify_after") or 0):
+                await self._deliver_news_approval(key, now)
+            return
+        if status == OutgoingStatus.PLANNED.value:
+            # 上一轮生成到一半进程退出了：还没发出任何请求，可以马上重试。
+            self._store.merge_outgoing_metadata(key, {"next_attempt_at": now, "last_error": "interrupted"})
+            self._store.update_outgoing(key, OutgoingStatus.FAILED, error="pre_send:interrupted")
+            return
+        if status == OutgoingStatus.SENDING.value:
+            # 发帖请求可能已经发出：绝不重发，交给老板确认。
+            self._store.update_outgoing(key, OutgoingStatus.SEND_UNKNOWN, error="interrupted_while_sending")
+            await self._notify_owner("今天的 AI 早报发到一半程序重启了，不确定有没有发出去，请看一眼小黑盒账号；不会自动重发。")
+            return
+        if status != OutgoingStatus.FAILED.value or metadata.get("final"):
+            return
+        attempts = int(metadata.get("attempts") or 1)
+        last_error = str(metadata.get("last_error") or row.get("error") or "")
+        if attempts >= NEWS_MAX_ATTEMPTS:
+            await self._finalize_news(key, "attempts_exhausted", last_error=last_error)
+            return
+        local = time.localtime(now)
+        deadline_at = time.mktime(
+            (local.tm_year, local.tm_mon, local.tm_mday, deadline // 60, deadline % 60, 0, 0, 0, -1)
+        )
+        next_at = float(metadata.get("next_attempt_at") or 0)
+        if past_deadline or max(now, next_at) >= deadline_at:
+            await self._finalize_news(key, "deadline", last_error=last_error)
+            return
+        if now < next_at or await self._news_blocker(day, key):
+            return
+        attempts += 1
+        mode = self._news_mode()
+        self._store.merge_outgoing_metadata(key, {"attempts": attempts, "mode": mode})
+        self._store.update_outgoing(key, OutgoingStatus.PLANNED)
+        await self._run_news_attempt(key, day, now, mode, attempts)
+
+    def _news_skip_reason(self, day: str) -> str:
+        skip_day, reason = self._news_skip
+        return reason if skip_day == day else ""
+
+    async def _news_blocker(self, day: str, key: str) -> str:
+        """现在不能开始的原因：她在睡、自动模式下小黑盒没登录、发送冷却中；没有就返回空。"""
+
+        reason = ""
+        if self.config.news.respect_sleep and await self._persona_asleep():
+            reason = "asleep"
+        elif self._news_mode() == "auto" and not str(self.config.basic.owner_qq or "").strip():
+            reason = "owner_missing"
+        elif self._news_mode() == "auto" and not (self._runtime and self._runtime.credentials):
+            reason = "not_logged_in"
+        elif self._news_mode() == "auto" and not self._cooldown_ready(exclude_action_key=key):
+            reason = "cooldown"
+        if reason:
+            await self._note_news_skip(day, reason)
+        return reason
+
+    async def _note_news_skip(self, day: str, reason: str) -> None:
+        if self._news_skip != (day, reason):
+            self._news_skip = (day, reason)
+            self.ctx.logger.info("每日 AI 早报暂缓：%s", reason)
+        marker = f"{day}:login"
+        if reason == "not_logged_in" and marker not in self._news_notified:
+            self._news_notified.add(marker)
+            await self._notify_owner("到点要发 AI 早报了，但小黑盒没登录。截止前重新扫码，早报还能照常发。")
+
+    async def _finalize_news(
+        self, key: str, reason: str, *, last_error: str = "", skip_reason: str = "", detail: str = ""
+    ) -> None:
+        """当天放弃：记一条 final 的失败记录，并私聊老板一次原因。"""
+
+        assert self._store is not None
+        marker = {"final": True, "final_reason": reason, "skip_reason": skip_reason, "detail": normalize_text(detail, 300)}
+        if self._store.get_outgoing(key) is None:
+            self._store.begin_outgoing(
+                OutgoingAction(key, "news_post", "", "", status=OutgoingStatus.FAILED, error=f"final:{reason}", metadata=marker)
+            )
+        else:
+            self._store.merge_outgoing_metadata(key, marker)
+            self._store.update_outgoing(key, OutgoingStatus.FAILED, error=f"final:{reason}")
+        self.ctx.logger.warning("每日 AI 早报今天放弃：%s %s", reason, normalize_text(last_error or detail, 160))
+        await self._notify_owner(
+            daily_news.failure_text(reason, last_error=last_error, skip_reason=skip_reason, detail=detail)
+        )
+
+    async def _run_news_attempt(self, key: str, day: str, now: float, mode: str, attempt: int) -> None:
+        """Generate a preview; auto mode persists it for explicit owner approval."""
+
+        assert self._store is not None
+        client: Any = None
+        topic_ids = ""
+        try:
+            if mode == "auto":
+                # 先确认登录和分区，配置不对就不花钱搜索和生成。
+                client, topic_ids = await self._news_publish_target()
+            draft = await self._build_news_draft(now=now, request_tag=f"xhh-news-{day.replace('-', '')}-a{attempt}")
+            if mode == "auto":
+                await self._queue_news_approval(key, day, draft, now)
+                return
+        except daily_news.NewsSkip as skip:
+            await self._finalize_news(key, skip.reason, detail=skip.detail)
+            return
+        except Exception as exc:  # noqa: BLE001 - 发帖前的失败都可以过一会儿重试
+            label = normalize_text(str(exc) if isinstance(exc, daily_news.NewsRetry) else _error_label(exc), 300)
+            self._store.merge_outgoing_metadata(key, {"next_attempt_at": now + NEWS_RETRY_GAP_SECONDS, "last_error": label})
+            self._store.update_outgoing(key, OutgoingStatus.FAILED, error=f"pre_send:{label}")
+            self.ctx.logger.warning("每日 AI 早报第 %d 次生成失败：%s", attempt, label)
+            return
+        self._store.merge_outgoing_metadata(key, draft.metadata())
+        if mode != "auto":
+            draft.notes.append(await self._news_topic_note())
+            self._store.update_outgoing(key, OutgoingStatus.DRY_RUN)
+            await self._notify_owner(
+                daily_news.owner_report(draft, header="AI 早报草稿（试运行，没发小黑盒）"), draft.image_bytes
+            )
+            return
+
+    def _news_approval_dir(self) -> Path:
+        assert self._store is not None
+        return self._store.path.parent / "news_drafts"
+
+    async def _queue_news_approval(self, key: str, day: str, draft: daily_news.NewsDraft, now: float) -> None:
+        assert self._store is not None
+        owner = str(self.config.basic.owner_qq or "").strip()
+        if not owner or not news_verification.sealed(draft):
+            raise daily_news.NewsRetry("verify_failed", "老板 QQ 未设置或正文未通过核查")
+        target = str(self.config.news.post_target)
+        draft.notes.append(f"发布分区：{target}")
+        packet = news_approval.packet(draft, owner=owner, profile=str(self.config.profile_id),
+            target=target, hashtags=self._news_hashtags())
+        checksum = news_approval.save(self._news_approval_dir(), packet)
+        self._store.merge_outgoing_metadata(key, {**draft.metadata(), "approval": {
+            "day": day, "digest": checksum, "owner": owner, "profile": str(self.config.profile_id),
+            "created_at": now, "delivered_at": 0, "approved_at": 0}})
+        self._store.update_outgoing(key, OutgoingStatus.AWAITING_APPROVAL)
+        await self._deliver_news_approval(key, now)
+
+    async def _deliver_news_approval(self, key: str, now: float) -> None:
+        assert self._store is not None
+        row = self._store.get_outgoing(key)
+        approval = dict((row.get("metadata") or {}).get("approval") or {})
+        if approval.get("owner") != str(self.config.basic.owner_qq or "").strip():
+            return
+        try:
+            packet = news_approval.load(self._news_approval_dir(), str(approval.get("digest") or ""))
+            draft = news_approval.restore(packet)
+            instructions = (f"AI 早报待确认（{approval['day']}，稿号 {approval['digest'][:8]}，尚未发布）\n"
+                "请看完正文和配图，再在这个 QQ 私聊单独回复：可以发送\n"
+                "不回复就不发；回复“取消发送”放弃本稿。仅当天有效，截止时间只限制生成重试。")
+            sent = await self._notify_owner(daily_news.owner_report(draft, header=instructions), draft.image_bytes)
+        except Exception as exc:  # noqa: BLE001
+            self.ctx.logger.warning("待确认早报私聊失败：%s", type(exc).__name__)
+            sent = False
+        approval.update({"delivered_at": time.time() if sent else 0, "notify_after": now + 600})
+        self._store.merge_outgoing_metadata(key, {"approval": approval})
+
+    @Command("xhh_news_approve", description="老板 QQ 私聊回复“可以发送”，发布当天已审核的早报；“取消发送”放弃。",
+        pattern=r"^(?:可以发送|取消发送)[！!。]?$", permission="everyone")
+    async def handle_news_approval_command(self, message: object = None, **kwargs: Any):
+        del kwargs
+        platform, user, group, text, timestamp = news_approval.message_identity(message)
+        if platform != "qq" or group or not user or user != str(self.config.basic.owner_qq or "").strip():
+            return False, "早报确认只接受老板本人在 QQ 私聊发送。", 1
+        if not re.fullmatch(r"(?:可以发送|取消发送)[！!。]?", text):
+            return False, "请单独回复“可以发送”或“取消发送”。", 1
+        if self._news_approval_task is not None and not self._news_approval_task.done():
+            await self._notify_owner("上一条早报确认正在处理，请稍等；不会重复发布。")
+            return True, "", 1
+        self._news_approval_task = asyncio.create_task(
+            self._confirm_news_approval(cancel=text.startswith("取消"), message_at=timestamp),
+            name="xiaoheihe-news-approval")
+        return True, "", 1
+
+    async def _confirm_news_approval(self, *, cancel: bool = False, message_at: float = 0) -> None:
+        async with self._news_lock:
+            await self._confirm_news_approval_locked(cancel=cancel, message_at=message_at)
+
+    async def _confirm_news_approval_locked(self, *, cancel: bool, message_at: float) -> None:
+        if self._store is None:
+            return
+        now = time.time()
+        day = time.strftime("%Y-%m-%d", time.localtime(now))
+        key = f"news:{day}"
+        row = self._store.get_outgoing(key)
+        if not row or row.get("status") != OutgoingStatus.AWAITING_APPROVAL.value:
+            await self._notify_owner("今天没有待确认的早报，或已经处理过。旧稿次日失效，不会重复发送。")
+            return
+        approval = dict((row.get("metadata") or {}).get("approval") or {})
+        if approval.get("day") != day or not approval.get("delivered_at"):
+            await self._notify_owner("这份早报尚未完整送达或已过期，不能发送。")
+            return
+        if message_at and message_at < int(float(approval["delivered_at"])):
+            await self._notify_owner("这条确认早于当前草稿，请看完最新稿后重新回复“可以发送”。")
+            return
+        if cancel:
+            self._store.merge_outgoing_metadata(key, {"final": True, "final_reason": "owner_cancelled"})
+            self._store.update_outgoing(key, OutgoingStatus.SUPPRESSED, error="owner_cancelled")
+            await self._notify_owner("已取消今天这份早报，不会发布到小黑盒。")
+            return
+        if not self.config.enabled or not self.config.news.enabled or self._news_mode() != "auto":
+            await self._notify_owner("当前未启用早报正式发送模式，待确认稿保留，未发布。")
+            return
+        try:
+            packet = news_approval.load(self._news_approval_dir(), str(approval.get("digest") or ""))
+            if packet.get("owner") != str(self.config.basic.owner_qq or "").strip() or packet.get("profile") != str(self.config.profile_id):
+                raise ValueError("approval_identity_changed")
+            draft = news_approval.restore(packet)
+            if not news_verification.sealed(draft):
+                raise ValueError("approval_verification_invalid")
+            if not self._cooldown_ready(exclude_action_key=key):
+                raise daily_news.NewsRetry("cooldown", "发送冷却中，请稍后再次确认")
+            client, topic_ids = await self._news_publish_target(target=str(packet["target"]))
+            approval["approved_at"] = time.time()
+            self._store.merge_outgoing_metadata(key, {"approval": approval})
+            await self._publish_news(key, draft, client, topic_ids)
+        except Exception as exc:  # noqa: BLE001 - Never retry an approved send automatically.
+            current = self._store.get_outgoing(key)
+            if current and current.get("status") == OutgoingStatus.AWAITING_APPROVAL.value:
+                approval["approved_at"] = 0
+                self._store.merge_outgoing_metadata(key, {"approval": approval})
+                await self._notify_owner("早报发布准备失败，原稿仍保留；未自动重试，请检查登录或稍后再回复“可以发送”。原因：" +
+                    normalize_text(str(exc) if isinstance(exc, daily_news.NewsRetry) else type(exc).__name__, 160))
+            self.ctx.logger.warning("早报确认发送中止：%s", type(exc).__name__)
+
+    async def _news_publish_target(self, *, target: str | None = None) -> tuple[Any, str]:
+        """自动发帖前的准备：拿到已登录的客户端和分区 ID。分区不存在当天放弃，其余问题可重试。"""
+
+        if self._runtime is None or self._runtime.credentials is None:
+            raise daily_news.NewsRetry("not_logged_in")
+        client = await self._runtime.client()
+        target = str(self.config.news.post_target if target is None else target).strip()
+        try:
+            topic_ids = await self._resolve_post_topic_ids(client, [target] if target else [])
+        except Exception as exc:  # noqa: BLE001
+            if str(getattr(exc, "category", "")) == "topic_selection":
+                raise daily_news.NewsSkip("topic_selection", target) from exc
+            raise daily_news.NewsRetry("topic_failed", _error_label(exc)) from exc
+        if not topic_ids:
+            raise daily_news.NewsSkip("topic_selection", target)
+        return client, ",".join(topic_ids)
+
+    async def _news_topic_note(self) -> str:
+        """试运行时顺便检查发帖分区，改成自动之前就能发现配置问题。"""
+
+        try:
+            await self._news_publish_target()
+        except daily_news.NewsSkip:
+            return f"发帖分区：找不到“{self.config.news.post_target}”，改成自动之前请换一个分区"
+        except daily_news.NewsRetry as exc:
+            return "发帖分区：小黑盒没登录，暂时没法检查" if exc.stage == "not_logged_in" else "发帖分区：这次没检查成功"
+        except Exception:  # noqa: BLE001
+            return "发帖分区：这次没检查成功"
+        return f"发帖分区：“{self.config.news.post_target}”能找到"
+
+    async def _build_news_draft(self, *, now: float, request_tag: str) -> daily_news.NewsDraft:
+        """搜索 → 筛选 → 模型挑选 → 读原文 → 模型写 → 程序核查 → 配图；不碰小黑盒。"""
+
+        if self._generator is None:
+            raise daily_news.NewsRetry("write_failed", "generator_unavailable")
+        news = self.config.news
+        blocked = [str(word) for word in (news.blocked_keywords or []) if str(word).strip()]
+        queries = daily_news.format_queries(list(news.queries or []) or list(daily_news.DEFAULT_QUERIES), now)
+        hits: list[dict[str, Any]] = []
+        errors: list[str] = []
+        for query in queries:
+            try:
+                hits.extend(_web_results(await self.ctx.web.search(query, max_results=10)))
+            except Exception as exc:  # noqa: BLE001 - 单条搜索失败不影响其它搜索词
+                errors.append(_error_label(exc))
+                self.ctx.logger.warning("早报搜索失败：%s", _error_label(exc))
+        if errors and len(errors) == len(queries):
+            raise daily_news.NewsRetry("search_failed", errors[0])
+        recent_urls, recent_titles = self._recent_news_sources(now)
+        candidates, dropped = daily_news.collect_candidates(hits, now=now, blocked=blocked, recent_urls=recent_urls)
+        funnel = daily_news.funnel_note(len(hits), len(candidates), dropped)
+        self.ctx.logger.info("早报候选：%s", funnel)
+        if len(candidates) < daily_news.MIN_ITEMS:
+            raise daily_news.NewsSkip("few_candidates", funnel)
+        picks = await self._generator.news_select(
+            candidates=candidates,
+            recent_titles=recent_titles,
+            min_items=daily_news.MIN_ITEMS,
+            max_items=min(daily_news.MAX_ITEMS + 3, len(candidates)),
+        )
+        if picks is None:
+            raise daily_news.NewsRetry("select_failed")
+        if not picks:
+            raise daily_news.NewsSkip("model_skip", funnel)
+        if len(picks) < daily_news.MIN_ITEMS:
+            raise daily_news.NewsRetry("too_few_items", f"模型只挑了 {len(picks)} 条")
+        picked = [dict(candidates[index - 1]) for index in picks]
+        source_slots = asyncio.Semaphore(3)
+        async def read_source(item):
+            async with source_slots:
+                await self._fetch_news_source(item, now=now)
+        await asyncio.gather(*(read_source(item) for item in picked))
+        source_removed = []
+        sourced = []
+        for item in picked:
+            if not item.get("documents"):
+                source_removed.append({"title": item["title"], "reason": item.get("source_error") or "evidence_missing"})
+            else:
+                sourced.append(item)
+        picked = sourced
+        if len(picked) < daily_news.MIN_ITEMS:
+            raise daily_news.NewsRetry("too_few_items", "能读取并核对原始日期的来源不足：" +
+                "；".join(f"{x['title'][:24]}：{daily_news.reason_label(x['reason'])}" for x in source_removed[:4]))
+        written = await self._generator.news_write(items=picked)
+        if written is None:
+            raise daily_news.NewsRetry("write_failed")
+        recent = self._recent_news_events(now)
+        try:
+            review = await self._generator.news_review(written=written, items=picked, recent=recent,
+                now=time.strftime("%Y-%m-%d %H:%M:%S %z", time.localtime(now)))
+        except Exception as exc:  # noqa: BLE001 - No critic means no publishable draft.
+            raise daily_news.NewsRetry("verify_failed", type(exc).__name__) from None
+        try:
+            checked, audit, semantic_removed = news_verification.gate(written, picked, review, now=now, recent=recent)
+        except (ValueError, TypeError, KeyError):
+            raise daily_news.NewsRetry("verify_failed", "独立审校响应缺失或不符合契约") from None
+        for item in picked:
+            item["source"] = daily_news.source_name(item["url"])
+        kept, removed, intro, take = daily_news.verify_written(checked, picked, blocked)
+        # verify_written sees the original picked IDs; avoid duplicate 'omitted' noise.
+        removed = source_removed + semantic_removed + [x for x in removed if x["reason"] != "omitted"]
+        if len(kept) < daily_news.MIN_ITEMS:
+            reasons = "；".join(
+                f"{item['title'][:20]}：{daily_news.reason_label(item['reason'])}" for item in removed[:3]
+            )
+            raise daily_news.NewsRetry("too_few_items", reasons)
+        draft = daily_news.NewsDraft(
+            title=daily_news.build_title(now),
+            blocks=daily_news.build_blocks(intro, kept, take),
+            items=kept,
+            dropped=removed,
+            notes=[funnel],
+        )
+        used = {item.get("review_id") for item in kept}
+        draft.verification = news_verification.seal(draft.blocks, [r for r in audit if r["id"] in used])
+        if news.generate_image:
+            draft.image_bytes, draft.image_note = await self._draw_news_image(draft, now)
+        return draft
+
+    async def _fetch_news_source(self, item: dict[str, Any], *, now: float | None = None) -> None:
+        """读真实公开页面与首次发布日期；无原文时不允许用搜索摘要兜底。"""
+        urls = [item["url"]] if news_sources.source_kind(item["url"]) else []
+        if not urls:
+            try:
+                query = normalize_text(item["title"] + " 官方 原始发布 announcement", 120)
+                hits = _web_results(await self.ctx.web.search(query, max_results=5))
+                urls = [str(hit.get("url") or "") for hit in hits
+                        if news_sources.source_kind(str(hit.get("url") or "")) == "primary"][:2]
+            except Exception as exc:  # noqa: BLE001
+                self.ctx.logger.info("早报原始来源检索失败：%s", type(exc).__name__)
+        docs = []
+        for url in dict.fromkeys(urls):
+            try:
+                document = await news_sources.fetch_document(url)
+                problem = news_verification.eligible_time(document, time.time() if now is None else now)
+                if not problem:
+                    docs.append(document)
+                else: item["source_error"] = problem
+            except Exception as exc:  # noqa: BLE001
+                self.ctx.logger.info("早报原文证据不可用：%s", type(exc).__name__)
+        if docs:
+            item["documents"] = docs
+            item["content"] = docs[0]["content"]
+            item["url"] = docs[0]["url"]
+            item["title"] = docs[0].get("title") or item["title"]
+            item["source"] = daily_news.source_name(item["url"])
+
+    def _recent_news_events(self, now: float) -> list[dict[str, Any]]:
+        """事件键去重；兼容旧版本只保存标题/正文的历史，交给审校辨认同一事件。"""
+        assert self._store is not None
+        history = []
+        for days_ago in range(1, daily_news.RECENT_DAYS + 1):
+            day = time.strftime("%Y-%m-%d", time.localtime(now - days_ago * 86400))
+            row = self._store.get_outgoing("news:" + day)
+            metadata = row.get("metadata") if row and isinstance(row.get("metadata"), dict) else {}
+            verified = metadata.get("verified_items") or []
+            if verified:
+                history.extend({"id": f"{day}:{n}", **item} for n, item in enumerate(verified, 1) if isinstance(item, dict))
+                continue
+            facts = re.findall(r"(?m)^\d+\. (.+)", str(metadata.get("body") or ""))
+            for n, source in enumerate(metadata.get("sources") or [], 1):
+                if not isinstance(source, dict): continue
+                fact = facts[n - 1].split("（", 1)[0] if n <= len(facts) else ""
+                history.append({"id": f"{day}:{n}", "title": str(source.get("title") or ""), "fact": fact,
+                                "url": str(source.get("url") or ""), "event": {}})
+        return history[-25:]
+
+    def _recent_news_sources(self, now: float) -> tuple[set[str], list[str]]:
+        """最近几天早报（含试运行草稿）用过的网址和标题，避免连着几天讲同一件事。"""
+
+        assert self._store is not None
+        urls: set[str] = set()
+        titles: list[str] = []
+        for days_ago in range(1, daily_news.RECENT_DAYS + 1):
+            row = self._store.get_outgoing("news:" + time.strftime("%Y-%m-%d", time.localtime(now - days_ago * 86400)))
+            metadata = row.get("metadata") if row and isinstance(row.get("metadata"), dict) else {}
+            for source in metadata.get("sources") or []:
+                if isinstance(source, dict) and source.get("url"):
+                    urls.add(str(source["url"]))
+                    titles.append(str(source.get("title") or ""))
+        return urls, [title for title in titles if title]
+
+    async def _draw_news_image(self, draft: daily_news.NewsDraft, now: float) -> tuple[bytes | None, str]:
+        """把核查后的资讯直接排版；取不到照片仍可生成完整文字长图。"""
+        try:
+            assets = await news_image.collect_media(
+                draft.items, photos=bool(getattr(self.config.news, "source_photos", True))
+            )
+            draft.image_sources = [
+                {"source_url": asset.source_url, "image_url": asset.image_url, "excerpt": asset.excerpt}
+                for asset in assets
+            ]
+            data = await asyncio.to_thread(news_image.render_news, draft, now=now, media=assets)
+            photos = sum(bool(asset.image) for asset in assets)
+            return data, f"配图：资讯一图流（{len(draft.items)} 条资讯，{photos} 张报道配图；其余使用文字或原文摘录）"
+        except Exception as exc:  # noqa: BLE001
+            self.ctx.logger.warning("早报一图流排版失败：%s", _error_label(exc))
+            return None, "配图：一图流排版失败，改发纯文字（" + _error_label(exc)[:80] + "）"
+
+    def _news_hashtags(self) -> list[str]:
+        tags: list[str] = []
+        for raw in self.config.news.hashtags or []:
+            tag = normalize_text(raw, 20).lstrip("#")
+            if tag and tag not in tags and is_news_publishable(tag)[0]:
+                tags.append(tag)
+        return tags[:5]
+
+    async def _publish_news(self, key: str, draft: daily_news.NewsDraft, client: Any, topic_ids: str) -> None:
+        """Publish only the exact owner-approved packet, once, including its image."""
+
+        assert self._store is not None
+        if not news_verification.sealed(draft):
+            raise daily_news.NewsRetry("verify_failed", "缺少本轮审校凭据或正文已变化")
+        approved = self._approved_news_packet(key, draft)
+        blocks: list[dict[str, Any]] = [{"type": "text", "text": block} for block in draft.blocks]
+        if draft.image_bytes:
+            try:
+                uploaded = await client.upload_image_bytes(draft.image_bytes, filename=f"{key.replace(':', '-')}.png")
+                blocks.append(
+                    {
+                        "type": "img",
+                        "url": str(uploaded["url"]),
+                        "width": int(uploaded.get("width") or 0),
+                        "height": int(uploaded.get("height") or 0),
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001 - Do not silently change the approved post.
+                raise daily_news.NewsRetry("image_upload_failed", _error_label(exc)) from exc
+        self._approved_news_packet(key, draft)
+        self._store.merge_outgoing_metadata(
+            key,
+            {"image_required": bool(draft.image_bytes), "image_note": draft.image_note, "topic_ids": topic_ids},
+        )
+        self._store.update_outgoing(key, OutgoingStatus.SENDING, error="send_started")
+        try:
+            result = await client.create_post(
+                title=draft.title,
+                content_blocks=blocks,
+                topic_ids=topic_ids,
+                hashtags=approved["hashtags"],
+            )
+        except Exception as exc:  # noqa: BLE001
+            category = str(getattr(exc, "category", ""))
+            if category in NEWS_REJECTED_CATEGORIES:
+                await self._finalize_news(key, "rejected", detail=normalize_text(str(exc), 160) or category)
+                return
+            self._store.update_outgoing(key, OutgoingStatus.SEND_UNKNOWN, error=_error_label(exc))
+            self.ctx.logger.error("早报发帖结果未知：%s", _error_label(exc))
+            await self._notify_owner(
+                f"AI 早报发帖请求出错（{_error_label(exc)[:80]}），不确定有没有发出去，请看一眼小黑盒账号；不会自动重发。"
+            )
+            return
+        link_id = str((result or {}).get("link_id") or "")
+        if not link_id:
+            self._store.update_outgoing(key, OutgoingStatus.SEND_UNKNOWN, error="missing_link_id")
+            await self._notify_owner("AI 早报已提交，但小黑盒没返回帖子 ID，请看一眼账号确认有没有发出来。")
+            return
+        # 拿到帖子 ID 马上落库：读回失败时，对账还能按这个 ID 核对。
+        self._store.merge_outgoing_metadata(key, {"link_id": link_id})
+        self._store.update_outgoing(key, OutgoingStatus.SEND_UNKNOWN, external_id=link_id, error="readback_pending")
+        verified = False
+        try:
+            context = await client.fetch_thread_context(link_id)
+            verified = bool(context) and _same_post_content(
+                draft.title, draft.body, context, require_image=bool(draft.image_bytes)
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.ctx.logger.warning("早报读回核对失败，稍后对账：%s", _error_label(exc))
+        self._store.update_outgoing(
+            key,
+            OutgoingStatus.VERIFIED if verified else OutgoingStatus.SEND_UNKNOWN,
+            external_id=link_id,
+            error="" if verified else "readback_not_found",
+        )
+        header = "AI 早报已发到小黑盒" if verified else "AI 早报已提交，读回还没对上（可能在审核）"
+        draft.notes.append(f"帖子：https://www.xiaoheihe.cn/app/bbs/link/{link_id}")
+        await self._notify_owner(daily_news.owner_report(draft, header=header), draft.image_bytes)
+
+    def _approved_news_packet(self, key: str, draft: daily_news.NewsDraft) -> dict:
+        assert self._store is not None
+        row = self._store.get_outgoing(key)
+        approval = ((row or {}).get("metadata") or {}).get("approval") or {}
+        day = time.strftime("%Y-%m-%d", time.localtime(time.time()))
+        if (not self.config.enabled or not self.config.news.enabled or self._news_mode() != "auto"
+                or not row or row.get("status") != OutgoingStatus.AWAITING_APPROVAL.value
+                or key != "news:" + day or approval.get("day") != day
+                or not approval.get("delivered_at") or not approval.get("approved_at")):
+            raise daily_news.NewsRetry("approval_required", "缺少当天老板私聊确认")
+        saved = news_approval.load(self._news_approval_dir(), str(approval.get("digest") or ""))
+        owner, profile = str(self.config.basic.owner_qq or "").strip(), str(self.config.profile_id)
+        if not owner or saved.get("owner") != owner or saved.get("profile") != profile:
+            raise daily_news.NewsRetry("approval_required", "账号或老板身份已变化")
+        current = news_approval.packet(draft, owner=owner, profile=profile,
+            target=str(saved["target"]), hashtags=saved["hashtags"])
+        if news_approval.digest(current) != approval["digest"]:
+            raise daily_news.NewsRetry("approval_required", "正文或配图已变化，需要重新审核")
+        return saved
+
+    @Command(
+        "xhh_news_preview",
+        description="可在 MaiBot 聊天中输入 /xhh_news_preview，马上生成一份 AI 早报草稿私聊老板（不发小黑盒）。",
+        pattern=r"^/xhh_news_preview$",
+        permission="operator",
+    )
+    async def handle_news_preview_command(self, **kwargs):
+        if not str(self.config.basic.owner_qq or "").strip():
+            return False, "先在小黑盒插件“基础设置”里填老板 QQ，草稿会私聊发到这个 QQ。", 1
+        if self._news_preview_task is not None and not self._news_preview_task.done():
+            return True, "上一份早报草稿还在生成，请稍等。", 2
+        self._news_preview_task = asyncio.create_task(self._run_news_preview(), name="xiaoheihe-news-preview")
+        return True, "开始生成 AI 早报草稿，生成好会私聊发你（不发小黑盒，不占当天名额）。", 2
+
+    async def _run_news_preview(self) -> None:
+        """预览：完整跑一遍生成和配图，只私聊老板；不写发送记录，不发帖。"""
+
+        now = time.time()
+        try:
+            draft = await self._build_news_draft(now=now, request_tag=f"xhh-news-preview-{int(now)}")
+        except daily_news.NewsSkip as skip:
+            await self._notify_owner(
+                daily_news.failure_text(skip.reason, detail=skip.detail, header="AI 早报预览没生成出来")
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            label = normalize_text(str(exc) if isinstance(exc, daily_news.NewsRetry) else _error_label(exc), 300)
+            self.ctx.logger.warning("AI 早报预览失败：%s", label)
+            await self._notify_owner(daily_news.failure_text("", last_error=label, header="AI 早报预览没生成出来"))
+            return
+        draft.notes.append(await self._news_topic_note())
+        await self._notify_owner(daily_news.owner_report(draft, header="AI 早报预览（没发小黑盒）"), draft.image_bytes)
 
     @Tool("xiaoheihe_status", brief_description="查看小黑盒运营插件状态")
     async def handle_status(self, **kwargs):
@@ -2060,6 +2863,22 @@ class XiaoheiheOperatorPlugin(MaiBotPlugin):
     async def handle_login_check_command(self, **kwargs):
         result = await self.handle_check_login(**kwargs)
         return True, f"小黑盒登录状态：{result.get('state', 'unknown')} {result.get('message', '')}", 2
+
+
+def _stream_id_of(stream: object) -> str:
+    """chat.get_stream_by_user_id 返回会话字典；没和老板私聊过时返回 None。"""
+
+    if isinstance(stream, dict):
+        return str(stream.get("stream_id") or stream.get("session_id") or "")
+    return str(getattr(stream, "stream_id", "") or getattr(stream, "session_id", "") or "")
+
+
+def _web_results(response: object) -> list[dict[str, Any]]:
+    """web.search 的结果列表；SDK 一般已解开外层 result，这里两种都认。"""
+
+    payload = response.get("result") if isinstance(response, dict) and isinstance(response.get("result"), dict) else response
+    results = payload.get("results") if isinstance(payload, dict) else None
+    return [item for item in results if isinstance(item, dict)] if isinstance(results, list) else []
 
 
 def _task_id(value: object) -> str:

@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "org.orge-8.xiaoheihe-operator",
-  "version": "0.5.0",
+  "version": "0.8.0",
   "name": "小黑盒运营",
   "description": "让 MaiBot 用自己的人设在小黑盒逛帖、点赞、评论和发帖，可联动生活轨迹和配图。",
   "author": {
@@ -28,11 +28,21 @@
     "min_version": "2.12.0",
     "max_version": "2.99.99"
   },
-  "dependencies": [],
+  "dependencies": [
+    {"type": "python_package", "name": "httpx", "version_spec": ">=0.27.0"},
+    {"type": "python_package", "name": "cryptography", "version_spec": ">=41.0.0"},
+    {"type": "python_package", "name": "Pillow", "version_spec": ">=10.0.0"}
+  ],
+  "changelog": "CHANGELOG.md",
   "capabilities": [
     "api.call",
     "config.get",
-    "llm.generate"
+    "llm.generate",
+    "web.search",
+    "web.fetch",
+    "chat.get_stream_by_user_id",
+    "send.text",
+    "send.image"
   ],
   "i18n": {
     "default_locale": "zh-CN"

@@ -8,6 +8,7 @@ from typing import Any
 class OutgoingStatus(StrEnum):
     PLANNED = "planned"
     DRY_RUN = "dry_run"
+    AWAITING_APPROVAL = "awaiting_approval"
     ACCEPTED = "accepted"
     SENDING = "sending"
     VERIFIED = "verified"

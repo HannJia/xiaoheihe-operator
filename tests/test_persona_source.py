@@ -96,6 +96,24 @@ class GeneratorPersonaTests(unittest.TestCase):
         asyncio.run(run())
         return [prompt[0]["content"] for prompt in llm.prompts]
 
+    def test_reply_prompt_prioritizes_the_comment_over_post_topic(self):
+        llm = _RecordingLLM("今天运气不错")
+        generator = ContentGenerator(llm)
+
+        asyncio.run(
+            generator.reply(
+                post_title="楼下那只猫今天居然肯让我摸了",
+                post_body="橘白猫主动蹭过来，让我摸了两下脑袋。",
+                comment="我喜欢你",
+            )
+        )
+
+        user_prompt = llm.prompts[0][1]["content"]
+        self.assertIn("对方评论：我喜欢你", user_prompt)
+        self.assertIn("优先回应对方评论里最新、最具体的表达", user_prompt)
+        self.assertIn("不要转去聊帖子主题", user_prompt)
+        self.assertIn("帖子正文只作为辅助语境", user_prompt)
+
     def test_every_prompt_starts_with_the_given_persona(self):
         async def persona():
             return "你的名字是小鱼。\n是学生。"

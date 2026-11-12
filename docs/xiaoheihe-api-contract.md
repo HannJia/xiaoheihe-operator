@@ -10,9 +10,11 @@
 - 表单：`is_cy`、`link_id`、`reply_id`、`root_id`、`text`
 - 主评论使用 `reply_id=-1`、`root_id=-1`。
 - 楼中楼使用收到评论的真实 `reply_id` 和 `root_id`。
-- 网页端查询字段使用 `web_version=3.0`、`version=999.0.4`、`client_type=web`、`x_app=heybox_website`。
-- 评论写入不附加通用的 `heybox_id` 和 `device_id` 字段。
-- `_time`、`nonce`、`hkey` 和 v15 `_rnd` 在请求边界统一生成。
+- 2026-11-12 按官网公开脚本核对：x_app=heybox_website、x_client_type=weboutapp、web_version=3.0、version=999.0.4，带账号 heybox_id 和稳定 device_id。
+- 评论使用 v16 _rnd：AES-256-GCM、12 字节随机 IV、AAD 为 heybox-rnd:v16，明文为时间字符串、nonce、带尾斜杠路径的 JSON 数组；密钥为官网客户端公开协议常量，不是用户凭证。hkey 和 v16 必须使用同一路径。
+- 原 v15 评论组合返回“评论功能暂不可用”；当前参数加 v16 已通过空文本校验和一次经用户明确授权的真实评论/读回验收。点赞契约维持原 v15，未批量改变其他写入端点。
+- HTTP 403 只记录 forbidden，不据此删登录凭证；401 或业务明确 relogin 才触发认证失效处理。
+- 直接依据：官网 index-C10NdQWW.js 中的 Uq、PW、aSe、Lke，以及 safe-route-CRoAfWje.js、index-Dl9lYtpi.js 的评论提交。
 
 ## 帖子点赞边界（0.5.0）
 

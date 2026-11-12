@@ -312,13 +312,14 @@ class OperatorStore:
 
     def count_since(self, kind: str, since: float) -> int:
         row = self._conn.execute(
-            "SELECT COUNT(*) AS count FROM outgoing_actions WHERE kind=? AND created_at>=? AND status NOT IN (?, ?, ?)",
+            "SELECT COUNT(*) AS count FROM outgoing_actions WHERE kind=? AND created_at>=? AND status NOT IN (?, ?, ?, ?)",
             (
                 kind,
                 since,
                 OutgoingStatus.SUPPRESSED.value,
                 OutgoingStatus.FAILED.value,
                 OutgoingStatus.DRY_RUN.value,
+                OutgoingStatus.AWAITING_APPROVAL.value,
             ),
         ).fetchone()
         return int(row["count"] if row else 0)
@@ -334,13 +335,14 @@ class OperatorStore:
         """Return the most recent non-terminal outgoing timestamp."""
         params: list[object] = []
         clauses = [
-            "status NOT IN (?, ?, ?)",
+            "status NOT IN (?, ?, ?, ?)",
         ]
         params.extend(
             [
                 OutgoingStatus.SUPPRESSED.value,
                 OutgoingStatus.FAILED.value,
                 OutgoingStatus.DRY_RUN.value,
+                OutgoingStatus.AWAITING_APPROVAL.value,
             ]
         )
         if kind:
@@ -383,17 +385,30 @@ class OperatorStore:
             item["metadata"] = {}
         return item
 
-    def list_outgoing(self, *, status: OutgoingStatus | None = None, limit: int = 50) -> list[dict[str, Any]]:
-        if status is None:
-            rows = self._conn.execute(
-                "SELECT * FROM outgoing_actions ORDER BY updated_at DESC LIMIT ?",
-                (max(1, min(limit, 200)),),
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                "SELECT * FROM outgoing_actions WHERE status=? ORDER BY updated_at ASC LIMIT ?",
-                (status.value, max(1, min(limit, 200))),
-            ).fetchall()
+    def list_outgoing(
+        self,
+        *,
+        status: OutgoingStatus | None = None,
+        since: float | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """status 为空时按更新时间倒序，否则正序；since 只取这之后创建的记录。"""
+
+        clauses: list[str] = []
+        params: list[object] = []
+        if status is not None:
+            clauses.append("status=?")
+            params.append(status.value)
+        if since is not None:
+            clauses.append("created_at>=?")
+            params.append(float(since))
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
+        order = "ASC" if status is not None else "DESC"
+        params.append(max(1, min(limit, 200)))
+        rows = self._conn.execute(
+            f"SELECT * FROM outgoing_actions {where}ORDER BY updated_at {order} LIMIT ?",
+            tuple(params),
+        ).fetchall()
         result: list[dict[str, Any]] = []
         for row in rows:
             item = dict(row)

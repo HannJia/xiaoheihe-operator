@@ -44,6 +44,7 @@ from .request_signing import (
     ensure_client_identity,
     generate_device_id,
     generate_workshop_rnd,
+    generate_web_rnd16,
 )
 from .security import redact_data
 
@@ -441,7 +442,9 @@ class XiaoheiheApiClient:
             "desc": "",
             "text": json.dumps(content_blocks, ensure_ascii=False),
             "post_type": "1",
-            "link_tag": "27" if any(_block_is_image(item) for item in content_blocks) else "21",
+            # 不带图也用 27（图文帖）。21 在小黑盒返回“错误的动态分区”，纯文字兜底一直发不出去；
+            # 参考 XIAOHEIHE_MCP publish.ts 的图文帖固定用 27。
+            "link_tag": "27",
             "draft": "1" if draft else "0",
             "view_limit": "1",
             "original": "1",
@@ -696,6 +699,7 @@ class XiaoheiheApiClient:
                 "账号未登录", status_code=401, category="credential_invalid"
             )
         is_web_form_write = name in _WEB_FORM_WRITES
+        is_comment = name == EndpointName.CREATE_COMMENT
         if is_web_form_write:
             # Web comment and like endpoints use their own v3 parameter
             # contract and Cookie authentication. Do not inherit the generic
@@ -717,18 +721,29 @@ class XiaoheiheApiClient:
                 request_params.setdefault(key, value)
             if self.credentials and self.credentials.uid:
                 request_params.setdefault("heybox_id", self.credentials.uid)
+        if is_comment:
+            # Follow the current official website's Uq() + RND16 contract.
+            request_params = {
+                "app": "heybox", "os_type": "web", "x_app": "heybox_website",
+                "x_client_type": "weboutapp", "x_os_type": "Windows", "web_version": "3.0",
+                "version": "999.0.4",
+            }
+            if self.credentials and self.credentials.uid:
+                request_params["heybox_id"] = self.credentials.uid
+        signing_path = contract.path.rstrip("/") + "/" if is_comment else contract.path
         signed = self._signer.sign(
             contract.method,
-            contract.path,
+            signing_path,
             params=request_params,
             json_body=json_body or form_body,
             signing_key=self.credentials.signing_key if self.credentials else "",
             device_id=self._device_id,
-            include_device_id=not is_web_form_write,
+            include_device_id=is_comment or not is_web_form_write,
         )
         if is_web_form_write:
-            signed.params["_rnd"] = generate_workshop_rnd(
-                int(signed.params["_time"]), signed.params["nonce"]
+            signed.params["_rnd"] = (
+                generate_web_rnd16(int(signed.params["_time"]), signed.params["nonce"], signing_path)
+                if is_comment else generate_workshop_rnd(int(signed.params["_time"]), signed.params["nonce"])
             )
         headers = dict(signed.headers)
         headers["Referer"] = "https://www.xiaoheihe.cn/"
@@ -788,7 +803,7 @@ class XiaoheiheApiClient:
                     details=_safe_response_payload(response),
                 )
                 self._remember_error(error)
-                if self._on_auth_invalid is not None:
+                if response.status_code == 401 and self._on_auth_invalid is not None:
                     await self._on_auth_invalid(self.profile_id, response.status_code)
                 raise error
 
@@ -1074,13 +1089,6 @@ def _validate_media_url(value: str) -> str:
     ):
         raise ResponseContractError("平台返回了不受支持的媒体地址", category="upload_contract")
     return value
-
-
-def _block_is_image(block: Mapping[str, Any]) -> bool:
-    kind = str(block.get("type", block.get("kind", ""))).casefold()
-    return kind in {"image", "img", "picture", "photo"} or bool(
-        block.get("image_url") or block.get("image")
-    )
 
 
 def _find_first_value(value: Any, *keys: str) -> str:

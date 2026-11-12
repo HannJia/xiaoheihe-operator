@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import types
 from pathlib import Path
@@ -67,6 +68,19 @@ def test_plugin_module_loads_with_runner_sdk_surface():
     assert config.content.generate_post_images is False
     assert config.automation.posts_per_day == 1
     assert config.post_topic_ids == ["Steam", "PC 游戏"]
+    # 早报默认关闭、试运行；老板 QQ 默认空，公开版装上后什么都不会私聊。
+    assert config.basic.owner_qq == ""
+    assert config.news.enabled is False
+    assert config.news.mode == "dry_run"
+    assert config.news.post_time == "08:00"
+    assert config.news.deadline_time == "11:00"
+    assert config.news.post_target == "盒友杂谈"
+    assert config.news.hashtags == ["AI资讯"]
+    assert config.news.generate_image is True
+    manifest = json.loads((plugin_root / "_manifest.json").read_text(encoding="utf-8"))
+    assert set(manifest["capabilities"]) >= {
+        "web.search", "web.fetch", "chat.get_stream_by_user_id", "send.text", "send.image"
+    }
     assert module._time_window_active("08:00", "23:00", 12 * 3600)
     assert not module._time_window_active("08:00", "23:00", 23 * 3600)
     local_01 = module.time.mktime((2026, 1, 1, 1, 0, 0, 0, 0, -1))
